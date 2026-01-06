@@ -1,4 +1,4 @@
-#include "server_net.h"
+#include "../headers/server_net.h"
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
@@ -14,7 +14,7 @@
  *  - file descriptor socketu
  *  - alebo -1 pri chybe
  */
-int net_listen_on_port(int port, int backlog)
+int network_listen_on_port(int port, int backlog)
 {
     // vytvorime TCP socket (IPv4, stream)
     int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -39,7 +39,7 @@ int net_listen_on_port(int port, int backlog)
     addr.sin_addr.s_addr = htonl(INADDR_ANY); // pocuva na vsetkych lokalnych IP
     addr.sin_port = htons((unsigned short)port);
 
-    // 4) bind = priradime socket ku konkretnemu portu
+    // bind = priradime socket ku konkretnemu portu
     if (bind(listen_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
         perror("bind");
         close(listen_fd);
@@ -65,7 +65,7 @@ int net_listen_on_port(int port, int backlog)
  *  - client socket fd
  *  - alebo -1 pri chybe
  */
-int net_accept_client(int listen_fd)
+int network_accept_client(int listen_fd)
 {
     int client_fd = accept(listen_fd, NULL, NULL);
     if (client_fd < 0) {
@@ -79,9 +79,9 @@ int net_accept_client(int listen_fd)
 /*
  * Posle cely buffer cez socket.
  * send() nemusi poslat vsetky data naraz,
- * preto posielame v cykle, kym sa neposle vsetko.
+ * preto posielam v cykle, kym sa neposle vsetko.
  */
-ssize_t net_send_all(int fd, const void *buf, size_t len)
+ssize_t network_send_all(int fd, const void *buf, size_t len)
 {
     const char *p = (const char*)buf;
     size_t sent = 0;
@@ -111,16 +111,18 @@ ssize_t net_send_all(int fd, const void *buf, size_t len)
  * recv() tiez nemusi precitat vsetko naraz,
  * preto citame v cykle.
  */
-ssize_t net_recv_all(int fd, void *buf, size_t len)
+ssize_t network_receive_all(int fd, void *buf, size_t len)
 {
-    char *p = (char*)buf;
+    char *p = buf;
     size_t recvd = 0;
 
     while (recvd < len) {
         ssize_t n = recv(fd, p + recvd, len - recvd, 0);
         if (n < 0) {
             // prerusenie signalom -> skusime znova
-            if (errno == EINTR) continue;
+            if (errno == EINTR) {
+                continue;
+            }
             perror("recv");
             return -1;
         }
@@ -139,7 +141,7 @@ ssize_t net_recv_all(int fd, void *buf, size_t len)
  * Bezpecne zatvori file descriptor.
  * Pouzivame pointer, aby sme ho mohli rovno nastavit na -1.
  */
-void net_close_fd(int *fd)
+void network_close_fd(int *fd)
 {
     if (fd == NULL) {
         return;

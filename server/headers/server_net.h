@@ -4,12 +4,12 @@
 #include <stddef.h>
 #include <stdio.h>
 
-int net_listen_on_port(int port, int backlog);
-int net_accept_client(int listen_fd);
+int network_listen_on_port(int port, int backlog);
+int network_accept_client(int listen_fd);
 
-ssize_t net_send_all(int fd, const void *buf, size_t len);
-ssize_t net_recv_all(int fd, void *buf, size_t len);
+ssize_t network_send_all(int fd, const void *buf, size_t len);
+ssize_t network_receive_all(int fd, void *buf, size_t len);
 
-void net_close_fd(int *fd);
+void network_close_fd(int *fd);
 
 #endif
