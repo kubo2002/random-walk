@@ -1,3 +1,39 @@
-//
-// Created by kubo on 1/6/26.
-//
+#include "client_net.h"
+
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+#include <arpa/inet.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+
+int net_connect_to_server(const char* ip, int port)
+{
+    // vytvor TCP socket
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) {
+        perror("socket");
+        return -1;
+    }
+
+    // priprav adresu servera
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons((unsigned short)port);
+
+    if (inet_pton(AF_INET, ip, &addr.sin_addr) <= 0) {
+        printf("[client] invalid ip address\n");
+        close(fd);
+        return -1;
+    }
+
+    // pripoj sa
+    if (connect(fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        perror("connect");
+        close(fd);
+        return -1;
+    }
+
+    return fd;
+}

@@ -1,8 +1,6 @@
-//
-// Created by kubo on 1/6/26.
-//
+#ifndef CLIENT_NET_H
+#define CLIENT_NET_H
 
-#ifndef RANDOM_WALK_CLIENT_NET_H
-#define RANDOM_WALK_CLIENT_NET_H
+int net_connect_to_server(const char* ip, int port);
 
-#endif //RANDOM_WALK_CLIENT_NET_H
+#endif
