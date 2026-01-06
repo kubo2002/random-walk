@@ -1,69 +1,155 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <netinet/in.h>
+#include <string.h>
 #include <unistd.h>
+#include <pthread.h>
+#include <netinet/in.h>
 #include "client_net.h"
 #include "../server/headers/server_net.h"
 #include "protocol.h"
 #include "protocol_io.h"
 
+static int g_fd = -1;
+static int g_running = 1;
+
+/*
+    Receiver thread:
+    - stale cita spravy zo servera a vypisuje ich
+*/
+static void* receiver_thread(void* arg)
+{
+    (void)arg;
+
+    while (g_running) {
+        msg_header_t hdr;
+        void* payload = NULL;
+
+        int r = protocol_receive(g_fd, &hdr, &payload);
+
+        if (r == 0) {
+            printf("[client] server disconnected\n");
+            g_running = 0;
+            break;
+        }
+        if (r < 0) {
+            printf("[client] recv error\n");
+            g_running = 0;
+            break;
+        }
+
+        if (hdr.type == MSG_WELCOME) {
+            printf("[client] WELCOME\n");
+        }
+        else if (hdr.type == MSG_STATUS) {
+            printf("[client] STATUS: %.*s\n", (int)hdr.payload_len, (char*)payload);
+        }
+        else if (hdr.type == MSG_PROGRESS) {
+            progress_t* p = (progress_t*)payload;
+            uint32_t i = ntohl(p->repl_index);
+            uint32_t total = ntohl(p->repl_total);
+            printf("[client] PROGRESS %u/%u\n", i, total);
+        }
+        else if (hdr.type == MSG_SUMMARY_DONE) {
+            printf("[client] SUMMARY_DONE\n");
+        }
+        else {
+            printf("[client] msg type=%u len=%u\n", hdr.type, hdr.payload_len);
+        }
+
+        free(payload);
+    }
+
+    return NULL;
+}
+
+/*
+    Input thread:
+    - cita prikazy z klavesnice a posiela ich serveru
+    - prikazy (pis do konzoly):
+        start
+        mode 0
+        mode 1
+        view 0
+        view 1
+        stop
+        bye
+*/
+static void* input_thread(void* arg)
+{
+    (void)arg;
+
+    char line[256];
+
+    while (g_running) {
+        printf("[client] command> ");
+        fflush(stdout);
+
+        if (!fgets(line, sizeof(line), stdin)) {
+            g_running = 0;
+            break;
+        }
+
+        // odstran \n
+        line[strcspn(line, "\r\n")] = 0;
+
+        if (strcmp(line, "start") == 0) {
+            start_sim_t s;
+
+            s.world_w = htonl(11);
+            s.world_h = htonl(11);
+            s.replications = htonl(10);
+            s.K = htonl(20);
+
+            s.p_up = htonl(250);
+            s.p_down = htonl(250);
+            s.p_left = htonl(250);
+            s.p_right = htonl(250);
+
+            s.mode = htonl(1); // summary
+            s.view = htonl(0); // avg_steps
+
+            protocol_send(g_fd, MSG_START_SIM, &s, sizeof(s));
+        }
+        else if (strncmp(line, "mode ", 5) == 0) {
+            int m = atoi(line + 5);
+            set_mode_t mm;
+            mm.mode = htonl((uint32_t)m);
+            protocol_send(g_fd, MSG_SET_MODE, &mm, sizeof(mm));
+        }
+        else if (strncmp(line, "view ", 5) == 0) {
+            int v = atoi(line + 5);
+            set_view_t vv;
+            vv.view = htonl((uint32_t)v);
+            protocol_send(g_fd, MSG_SET_VIEW, &vv, sizeof(vv));
+        }
+        else if (strcmp(line, "stop") == 0) {
+            protocol_send(g_fd, MSG_STOP_SIM, NULL, 0);
+        }
+        else if (strcmp(line, "bye") == 0) {
+            protocol_send(g_fd, MSG_BYE, NULL, 0);
+            g_running = 0;
+            break;
+        }
+        else {
+            printf("[client] commands: start | mode 0/1 | view 0/1 | stop | bye\n");
+        }
+    }
+
+    return NULL;
+}
+
 static const char* read_ip(int argc, char** argv)
 {
-    // client <ip> <port>
-    // default: 127.0.0.1
     if (argc < 2) return "127.0.0.1";
     return argv[1];
 }
 
-static int read_port(int argc, char** argv) {
-    if (argc < 3) {
-        return 5555;
-    }
-
+static int read_port(int argc, char** argv)
+{
+    if (argc < 3) return 5555;
     int p = atoi(argv[2]);
-
-    if (p <= 0 || p > 65535) {
-        return 5555;
-    }
-
+    if (p <= 0 || p > 65535) return 5555;
     return p;
-}
-
-static int send_hello(int fd)
-{
-    hello_t h;
-    h.version = htonl(1);
-
-    return protocol_send(fd, MSG_HELLO, &h, sizeof(h));
-}
-
-static int send_start_sim(int fd)
-{
-    // toto su len default hodnoty, aby sme videli, ze protokol funguje
-    start_sim_t s;
-
-    s.world_w = htonl(11);
-    s.world_h = htonl(11);
-    s.replications = htonl(5);
-    s.K = htonl(20);
-
-    // pravdepodobnosti v promile (0..1000), suma musi byt 1000
-    s.p_up = htonl(250);
-    s.p_down = htonl(250);
-    s.p_left = htonl(250);
-    s.p_right = htonl(250);
-
-    // mode: 0=interactive, 1=summary
-    s.mode = htonl(1); // summary
-    // view: 0=avg_steps, 1=prob_k
-    s.view = htonl(0); // avg_steps
-
-    return protocol_send(fd, MSG_START_SIM, &s, sizeof(s));
-}
-
-static int send_bye(int fd)
-{
-    return protocol_send(fd, MSG_BYE, NULL, 0);
 }
 
 int main(int argc, char** argv)
@@ -71,86 +157,31 @@ int main(int argc, char** argv)
     const char* ip = read_ip(argc, argv);
     int port = read_port(argc, argv);
 
-    printf("[client] connecting to %s:%d ...\n", ip, port);
+    printf("[client] connecting to %s:%d...\n", ip, port);
 
-    int fd = net_connect_to_server(ip, port);
-    if (fd < 0) {
+    g_fd = net_connect_to_server(ip, port);
+    if (g_fd < 0) {
         printf("[client] connect failed\n");
         return 1;
     }
 
-    printf("[client] connected\n");
-
     // HELLO
-    if (send_hello(fd) < 0) {
-        printf("[client] failed to send HELLO\n");
-        close(fd);
-        return 1;
-    }
+    hello_t h;
+    h.version = htonl(1);
+    protocol_send(g_fd, MSG_HELLO, &h, sizeof(h));
 
-    // caka na WELCOME
-    {
-        msg_header_t hdr;
-        void* payload = NULL;
+    // start threads
+    pthread_t t_recv, t_in;
 
-        int r = protocol_receive(fd, &hdr, &payload);
-        if (r <= 0) {
-            printf("[client] failed to receive WELCOME\n");
-            close(fd);
-            return 1;
-        }
+    pthread_create(&t_recv, NULL, receiver_thread, NULL);
+    pthread_create(&t_in, NULL, input_thread, NULL);
 
-        if (hdr.type == MSG_WELCOME) {
-            printf("[client] got WELCOME\n");
-        } else {
-            printf("[client] unexpected msg type %u\n", hdr.type);
-        }
+    pthread_join(t_in, NULL);
+    g_running = 0; // nech receiver skonci
+    shutdown(g_fd, SHUT_RDWR);
+    pthread_join(t_recv, NULL);
 
-        free(payload);
-    }
-
-    // START_SIM
-    if (send_start_sim(fd) < 0) {
-        printf("[client] failed to send START_SIM\n");
-        close(fd);
-        return 1;
-    }
-    printf("[client] START_SIM sent\n");
-
-    /*
-        cita odpovede zo servera
-        Zatial viem, ze server posiela MSG_STATUS po START_SIM.
-    */
-    printf("[client] waiting for server messages (press ENTER to send BYE)\n");
-
-    {
-        msg_header_t hdr;
-        void* payload = NULL;
-
-        int r = protocol_receive(fd, &hdr, &payload);
-        if (r <= 0) {
-            printf("[client] server closed or error\n");
-            close(fd);
-            return 1;
-        }
-
-        if (hdr.type == MSG_STATUS) {
-            // payload je text
-            printf("[client] STATUS: %.*s\n", (int)hdr.payload_len, (char*)payload);
-        } else {
-            printf("[client] got msg type %u (len=%u)\n", hdr.type, hdr.payload_len);
-        }
-
-        free(payload);
-    }
-
-    // teraz uz fakt len pockame na enter a posleme BYE
-    printf("[client] press ENTER to disconnect...\n");
-    getchar();
-
-    send_bye(fd);
-    close(fd);
-
-    printf("[client] disconnected\n");
+    close(g_fd);
+    printf("[client] done\n");
     return 0;
 }
