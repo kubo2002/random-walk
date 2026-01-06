@@ -56,6 +56,7 @@ static void* simulation_thread(void* arg)
         // pocka na START_SIM
         pthread_mutex_lock(&g_sim_lock);
 
+        // caka na signal spustenia simulacie z hlavneho vlakna
         while (g_running && g_sim_running == 0) {
             pthread_cond_wait(&g_sim_cv, &g_sim_lock);
         }
@@ -75,8 +76,11 @@ static void* simulation_thread(void* arg)
 
         for (uint32_t i = 1; i <= reps; i++) {
 
+            // !!!
             // tu neskor pride realna logika random walk
-            // zatial len simulujeme pracu
+            // !!!
+
+            // zatial len simulujem pracu
             usleep(300 * 1000); // 300 ms
 
             progress_t p;
@@ -96,7 +100,7 @@ static void* simulation_thread(void* arg)
             }
         }
 
-        // 3) koniec simulacie
+        // koniec simulacie
         send_to_client(MSG_SUMMARY_DONE, NULL, 0);
 
         const char* done = "simulation finished";
