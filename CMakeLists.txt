@@ -7,6 +7,7 @@ add_executable(server
         server/src/server.c
         server/src/server_net.c
         common/protocol_io.c
+        server/src/simulation.c
 )
 
 target_include_directories(server PRIVATE
@@ -19,6 +20,7 @@ add_executable(client
         client/src/client_net.c
         server/src/server_net.c
         common/protocol_io.c
+        client/src/render.c
 )
 
 target_include_directories(client PRIVATE
