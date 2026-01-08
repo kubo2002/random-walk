@@ -3,214 +3,136 @@
 #include <string.h>
 #include <unistd.h>
 #include <pthread.h>
-#include <netinet/in.h>
+#include <arpa/inet.h>
+
 #include "client_net.h"
-#include "../server/headers/server_net.h"
 #include "protocol.h"
 #include "protocol_io.h"
 #include "render.h"
+#include "menu.h"
 
-static int g_fd = -1;
 static int g_running = 1;
-static int g_summary_active = 0;   // 1 = cakame na summary pre aktualny start
-static int g_current_view = 0;     // 0=avg, 1=prob
-/*
-    Receiver thread:
-    - stale cita spravy zo servera a vypisuje ich
-*/
-static void* receiver_thread(void* arg)
-{
+static int g_socket_fd = -1;
+static int g_mode = 0; // 0 interactive, 1 summary
+static int g_view = 0; // 0 avg, 1 prob
+
+// Vlakno na prijimanie sprav zo servera
+void* receiver_thread(void* arg) {
     (void)arg;
+    msg_header_t hdr;
+    void* payload = NULL;
 
-    while (g_running) {
-        msg_header_t hdr;
-        void* payload = NULL;
-
-        int r = protocol_receive(g_fd, &hdr, &payload);
-
-        if (r == 0) {
-            printf("[client] server disconnected\n");
-            g_running = 0;
-            break;
-        }
-        if (r < 0) {
-            printf("[client] recv error\n");
-            g_running = 0;
-            break;
-        }
-
-        if (hdr.type == MSG_WELCOME) {
-            printf("[client] WELCOME\n");
-        }
-        else if (hdr.type == MSG_STATUS) {
-            printf("[client] STATUS: %.*s\n", (int)hdr.payload_len, (char*)payload);
-        }
-        else if (hdr.type == MSG_PROGRESS) {
-            progress_t* p = (progress_t*)payload;
-            uint32_t i = ntohl(p->repl_index);
-            uint32_t total = ntohl(p->repl_total);
-            printf("[client] PROGRESS %u/%u\n", i, total);
-        }
-        else if (hdr.type == MSG_SUMMARY_DONE) {
-            if (g_summary_active) {
-                printf("[client] SUMMARY_DONE\n");
-                render_summary_end(g_current_view);
-                g_summary_active = 0;
+    while (g_running && protocol_receive(g_socket_fd, &hdr, &payload) > 0) {
+        switch (hdr.type) {
+            case MSG_STATUS:
+                printf("\n[server] %s\n", (char*)payload);
+                break;
+            case MSG_PROGRESS: {
+                progress_t* p = (progress_t*)payload;
+                printf("\r[progres] %u / %u replikacii", p->repl_index, p->repl_total);
+                fflush(stdout);
+                break;
             }
+            case MSG_INTERACTIVE_STEP: {
+                interactive_step_t* s = (interactive_step_t*)payload;
+                render_interactive_step(s->x, s->y);
+                break;
+            }
+            case MSG_WORLD_DATA: {
+                render_interactive_world_data((uint8_t*)payload, hdr.payload_len);
+                break;
+            }
+            case MSG_SUMMARY_CELL: {
+                summary_cell_t* c = (summary_cell_t*)payload;
+                render_summary_cell(c->x, c->y, c->value_fixed);
+                break;
+            }
+            case MSG_SUMMARY_DONE:
+                render_summary_end(g_view);
+                printf("\n[klient] Simulacia dokoncena. Stlacte ENTER pre navrat do menu.\n");
+                break;
+            case MSG_INTERACTIVE_DONE:
+                render_interactive_end();
+                printf("\n[klient] Interaktivna simulacia dokoncena. Stlacte ENTER pre navrat do menu.\n");
+                break;
         }
-        else if (hdr.type == MSG_SUMMARY_CELL) {
-            summary_cell_t* c = (summary_cell_t*)payload;
-
-            int32_t x = (int32_t)ntohl((uint32_t)c->x);
-            int32_t y = (int32_t)ntohl((uint32_t)c->y);
-            int32_t v = (int32_t)ntohl((uint32_t)c->value_fixed);
-
-            render_summary_cell((int)x, (int)y, (int)v);
-        }
-
-        else {
-            printf("[client] msg type=%u len=%u\n", hdr.type, hdr.payload_len);
-        }
-
-        free(payload);
+        if (payload) { free(payload); payload = NULL; }
     }
-
+    g_running = 0;
     return NULL;
 }
 
-/*
-    Input thread:
-    - cita prikazy z klavesnice a posiela ich serveru
-    - prikazy:
-        start
-        mode 0
-        mode 1
-        view 0
-        view 1
-        stop
-        bye
-*/
-static void* input_thread(void* arg)
-{
-    (void)arg;
+int main(int argc, char** argv) {
+    char* ip = (argc > 1) ? argv[1] : "127.0.0.1";
+    int port = (argc > 2) ? atoi(argv[2]) : 5555;
 
-    char line[256];
-
-    while (g_running) {
-        printf("[client] command> ");
-        fflush(stdout);
-
-        if (!fgets(line, sizeof(line), stdin)) {
-            g_running = 0;
-            break;
-        }
-
-        // odstran \n
-        line[strcspn(line, "\r\n")] = 0;
-
-        if (strcmp(line, "start") == 0) {
-            start_sim_t s;
-
-            int w = 11;
-            int h = 11;
-            int replications = 10; // avg_steps
-            int K = 20;
-            s.world_w = htonl(11);
-            s.world_h = htonl(11);
-            s.replications = htonl((uint32_t)(replications));
-            s.K = htonl((uint32_t)K);
-            s.p_up = htonl(250);
-            s.p_down = htonl(250);
-            s.p_left = htonl(250);
-            s.p_right = htonl(250);
-            s.mode = htonl(1); // summary
-            s.view = htonl((uint32_t)g_current_view);
-
-            g_summary_active = 1;
-            render_summary_begin(w, h, g_current_view);
-            protocol_send(g_fd, MSG_START_SIM, &s, sizeof(s));
-        }
-        else if (strncmp(line, "mode ", 5) == 0) {
-            int m = atoi(line + 5);
-            set_mode_t mm;
-            mm.mode = htonl((uint32_t)m);
-            protocol_send(g_fd, MSG_SET_MODE, &mm, sizeof(mm));
-        }
-        else if (strncmp(line, "view ", 5) == 0) {
-            int v = atoi(line + 5);
-            if (v != 0 && v != 1) {
-                printf("[client] view must be 0 or 1\n");
-                continue;
-            }
-
-            g_current_view = v;
-            set_view_t vv;
-            vv.view = htonl((uint32_t)v);
-            protocol_send(g_fd, MSG_SET_VIEW, &vv, sizeof(vv));
-
-            printf("[client] view set to %d\n", v);
-        }
-        else if (strcmp(line, "stop") == 0) {
-            protocol_send(g_fd, MSG_STOP_SIM, NULL, 0);
-        }
-        else if (strcmp(line, "bye") == 0) {
-            protocol_send(g_fd, MSG_BYE, NULL, 0);
-            g_running = 0;
-            break;
-        }
-        else {
-            printf("[client] commands: start | mode 0/1 | view 0/1 | stop | bye\n");
-        }
-    }
-
-    return NULL;
-}
-
-static const char* read_ip(int argc, char** argv) {
-    if (argc < 2) {
-        return "127.0.0.1";
-    }
-    return argv[1];
-}
-
-static int read_port(int argc, char** argv)
-{
-    if (argc < 3) return 5555;
-    int p = atoi(argv[2]);
-    if (p <= 0 || p > 65535) return 5555;
-    return p;
-}
-
-int main(int argc, char** argv)
-{
-    const char* ip = read_ip(argc, argv);
-    int port = read_port(argc, argv);
-
-    printf("[client] connecting to %s:%d...\n", ip, port);
-
-    g_fd = net_connect_to_server(ip, port);
-    if (g_fd < 0) {
-        printf("[client] connect failed\n");
+    g_socket_fd = net_connect_to_server(ip, port);
+    if (g_socket_fd < 0) {
+        printf("Nepodarilo sa pripojit k serveru.\n");
         return 1;
     }
 
-    // HELLO
-    hello_t h;
-    h.version = htonl(1);
-    protocol_send(g_fd, MSG_HELLO, &h, sizeof(h));
+    protocol_send(g_socket_fd, MSG_HELLO, NULL, 0);
 
-    // start threads
-    pthread_t t_recv, t_in;
+    pthread_t recv_tid;
+    pthread_create(&recv_tid, NULL, receiver_thread, NULL);
 
-    pthread_create(&t_recv, NULL, receiver_thread, NULL);
-    pthread_create(&t_in, NULL, input_thread, NULL);
+    while (g_running) {
+        menu_print_main();
+        int choice = menu_get_choice();
 
-    pthread_join(t_in, NULL);
-    g_running = 0; // nech receiver skonci
-    shutdown(g_fd, SHUT_RDWR);
-    pthread_join(t_recv, NULL);
+        if (choice == MENU_NEW_SIM) {
+            start_sim_t params;
+            char world_file[64], save_file[64];
+            int world_type;
+            menu_get_sim_params(&params, world_file, save_file, &world_type);
+            
+            params.world_type = (uint32_t)world_type;
+            strncpy(params.world_file, world_file, 63);
+            strncpy(params.save_file, save_file, 63);
+            
+            g_mode = params.mode;
+            g_view = params.view;
 
-    close(g_fd);
-    printf("[client] done\n");
+            if (g_mode == 0) render_interactive_begin(params.world_w, params.world_h);
+            else render_summary_begin(params.world_w, params.world_h, g_view);
+
+            protocol_send(g_socket_fd, MSG_START_SIM, &params, sizeof(params));
+            
+            // Cakanie na koniec simulacie, aby menu neprekrylo vystup
+            printf("[client] Simulacia bezi, pockajte na dokoncenie...\n");
+            
+            // Po skonceni simulacie (ked receiver thread vypise spravu),
+            // chceme aby si user mohol v klude pozriet vysledok.
+            // Preto tu pridame getchar() na "ENTER" pre navrat.
+            while (getchar() != '\n'); // vycisti buffer
+            getchar(); // pockaj na enter
+            
+        } else if (choice == MENU_JOIN_SIM) {
+            printf("Pripajanie k beziacej simulacii...\n");
+            // Server automaticky posle data novemu klientovi
+        } else if (choice == MENU_RESTART_SIM) {
+            restart_sim_t r;
+            menu_get_restart_params(r.load_file, &r.replications, r.save_file);
+            protocol_send(g_socket_fd, MSG_RESTART_SIM, &r, sizeof(r));
+            
+            printf("[client] Restart simulacie bezi, pockajte na dokoncenie...\n");
+            while (getchar() != '\n'); 
+            getchar(); 
+
+        } else if (choice == MENU_EXIT) {
+            protocol_send(g_socket_fd, MSG_BYE, NULL, 0);
+            g_running = 0;
+            break;
+        } else if (choice == 5) { // Skryta volba pre zmenu zobrazenia
+            g_view = 1 - g_view;
+            set_view_t sv = {(uint32_t)g_view};
+            protocol_send(g_socket_fd, MSG_SET_VIEW, &sv, sizeof(sv));
+            printf("Zobrazenie zmenene na: %s\n", g_view == 0 ? "AvgSteps" : "ProbK");
+        }
+    }
+
+    close(g_socket_fd);
+    pthread_join(recv_tid, NULL);
     return 0;
 }

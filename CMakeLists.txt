@@ -8,6 +8,7 @@ add_executable(server
         server/src/server_net.c
         common/protocol_io.c
         server/src/simulation.c
+        server/src/world.c
 )
 
 target_include_directories(server PRIVATE
@@ -21,6 +22,7 @@ add_executable(client
         server/src/server_net.c
         common/protocol_io.c
         client/src/render.c
+        client/src/menu.c
 )
 
 target_include_directories(client PRIVATE
