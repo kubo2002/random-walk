@@ -2,6 +2,7 @@
 #define SIMULATION_H
 
 #include <stdint.h>
+#include "world.h"
 
 typedef struct {
     uint32_t p_up;
@@ -11,24 +12,22 @@ typedef struct {
 } move_probs_t;
 
 /*
-    Jedna nahodna pochodzka v svete w x h s wrap-around.
-
-    start_x, start_y su indexy 0..w-1, 0..h-1
-    center_x, center_y je stred sveta (typicky w/2, h/2)
+    Jedna nahodna pochodzka v svete w x h.
+    Repektuje prekazky a wrap-around (len ak nie su prekazky).
 
     Vrati:
     - pocet krokov, ak sa dostal do stredu
-    - max_steps+1, ak sa do stredu nedostal v limite (fail-safe)
+    - max_steps+1, ak sa do stredu nedostal v limite
 */
 int simulate_walking(
     int start_x,
     int start_y,
-    int w,
-    int h,
-    int center_x,
-    int center_y,
+    const world_t* world,
+    bool has_obstacles,
     const move_probs_t* probs,
     int max_steps
 );
+
+void simulate_one_step(int* x, int* y, const world_t* world, bool has_obstacles, const move_probs_t* probs);
 
 #endif

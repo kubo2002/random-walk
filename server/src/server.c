@@ -3,177 +3,188 @@
 #include <string.h>
 #include <unistd.h>
 #include <pthread.h>
+#include <time.h>
 #include <netinet/in.h>
+
 #include "server_net.h"
 #include "protocol.h"
 #include "protocol_io.h"
-#include "../server/headers/simulation.h"
+#include "simulation.h"
+#include "world.h"
 
-/*
-    SIMPLE SERVER STATE
-
-    - client_fd: aktualne pripojeny klient (len 1 klient)
-    - sim_running: ci bezi simulacia
-    - sim_params: parametre simulacie (z MSG_START_SIM)
-*/
+// --- Globalne premenne pre stav servera ---
 static int g_running = 1;
 
 static int g_client_fd = -1;
 static pthread_mutex_t g_client_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static int g_sim_running = 0;
-static start_sim_t g_sim_params; // ulozime sem START_SIM (v network order alebo host order - my si dame host)
+static start_sim_t g_sim_params; 
+static world_t* g_world = NULL;
 static pthread_mutex_t g_sim_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_sim_cv = PTHREAD_COND_INITIALIZER;
 
-/*
-    Helper: posli spravu klientovi (ak je pripojeny)
-*/
-static void send_to_client(uint32_t type, const void* payload, uint32_t payload_len)
-{
+// Pomocna funkcia na poslanie spravy aktualnemu klientovi
+static void send_to_client(uint32_t type, const void* payload, uint32_t payload_len) {
     pthread_mutex_lock(&g_client_lock);
     int fd = g_client_fd;
     pthread_mutex_unlock(&g_client_lock);
 
-    if (fd < 0) return;
-
-    // ak send zlyha, zatial len ignorujeme (neskor mozeme odpojit klienta)
-    protocol_send(fd, type, payload, payload_len);
+    if (fd >= 0) {
+        protocol_send(fd, type, payload, payload_len);
+    }
 }
 
-/*
-    Sim thread:
-    - caka, kym pride START_SIM
-    - potom spravi "replications" cyklus
-    - po kazdej replikacii posle PROGRESS
-    - na konci posle STATUS + SUMMARY_DONE (zatial bez realnych dat)
-*/
-static void* simulation_thread(void* arg)
-{
+// Funkcia na ulozenie vysledkov do suboru
+static void save_results_to_file(const char* filename, int w, int h, double* avg_steps, double* prob_k) {
+    FILE* f = fopen(filename, "w");
+    if (!f) {
+        printf("[server] Chyba pri otvarani suboru pre zapis: %s\n", filename);
+        return;
+    }
+
+    fprintf(f, "X;Y;AvgSteps;ProbK\n");
+    for (int y = 0; y < h; y++) {
+        for (int x = 0; x < w; x++) {
+            int idx = y * w + x;
+            fprintf(f, "%d;%d;%.2f;%.4f\n", x, y, avg_steps[idx], prob_k[idx]);
+        }
+    }
+    fclose(f);
+    printf("[server] Vysledky ulozene do: %s\n", filename);
+}
+
+// Vlakno pre simulaciu
+static void* simulation_thread(void* arg) {
     (void)arg;
+    printf("[server] Simulacne vlakno nastartovane.\n");
 
     while (g_running) {
-
-        // pockaj na START_SIM
+        // Caka na signal pre start simulacie
         pthread_mutex_lock(&g_sim_lock);
         while (g_running && g_sim_running == 0) {
             pthread_cond_wait(&g_sim_cv, &g_sim_lock);
         }
-
         if (!g_running) {
             pthread_mutex_unlock(&g_sim_lock);
             break;
         }
 
-        // skopiruj parametre do lokalnych premennych (host order)
-        uint32_t w    = g_sim_params.world_w;
-        uint32_t h    = g_sim_params.world_h;
-        uint32_t reps = g_sim_params.replications;
-        uint32_t K    = g_sim_params.K;
-
-        move_probs_t probs;
-        probs.p_up    = g_sim_params.p_up;
-        probs.p_down  = g_sim_params.p_down;
-        probs.p_left  = g_sim_params.p_left;
-        probs.p_right = g_sim_params.p_right;
-
-        uint32_t view = g_sim_params.view; // 0=avg, 1=prob
+        // Kopirovanie parametrov
+        start_sim_t params = g_sim_params;
+        world_t* world = g_world;
         pthread_mutex_unlock(&g_sim_lock);
 
-        // status len raz
-        send_to_client(MSG_STATUS, "simulation running (summary)",(uint32_t)strlen("simulation running (summary)"));
+        int w = world->width;
+        int h = world->height;
+        int reps = params.replications;
+        int K = params.K;
+        move_probs_t probs = {params.p_up, params.p_down, params.p_left, params.p_right};
+        bool has_obstacles = (params.world_type != 0);
 
-        int center_x = (int)(w / 2);
-        int center_y = (int)(h / 2);
+        // Priprava poli pre statistiky (pre sumarny mod)
+        double* total_steps = (double*)calloc(w * h, sizeof(double));
+        double* success_k = (double*)calloc(w * h, sizeof(double));
 
-        size_t n = (size_t)w * (size_t)h;
+        send_to_client(MSG_STATUS, "Simulacia zacala", (uint32_t)strlen("Simulacia zacala"));
 
-        uint64_t* total_steps = (uint64_t*)calloc(n, sizeof(uint64_t));
-        uint32_t* success_k   = (uint32_t*)calloc(n, sizeof(uint32_t));
-
-        if (!total_steps || !success_k) {
-            send_to_client(MSG_STATUS, "malloc failed", (uint32_t)strlen("malloc failed"));
-            free(total_steps);
-            free(success_k);
-
+        // Hlavny cyklus replikacii
+        for (int r = 1; r <= reps; r++) {
+            // Kontrola ci simulacia nema skoncit (napr. stop od uzivatela)
             pthread_mutex_lock(&g_sim_lock);
-            g_sim_running = 0;
+            if (!g_sim_running) {
+                pthread_mutex_unlock(&g_sim_lock);
+                break;
+            }
             pthread_mutex_unlock(&g_sim_lock);
-            continue;
-        }
 
-        int max_steps = (int)(w * h * 50);
-        if (max_steps < 1000) max_steps = 1000;
+            // Poslanie progresu (kazda 10. replikacia alebo posledna pre znizenie trafficu)
+            if (r % 10 == 0 || r == reps) {
+                progress_t prog = {(uint32_t)r, (uint32_t)reps};
+                send_to_client(MSG_PROGRESS, &prog, sizeof(prog));
+            }
 
-        // vykonaj presne reps replikacii (len raz)
-        for (uint32_t r = 1; r <= reps; r++) {
+            // Pre kazde policko (ktore nie je prekazka) robime pochodzku
+            for (int y = 0; y < h; y++) {
+                for (int x = 0; x < w; x++) {
+                    if (world_get_cell(world, x, y) == CELL_OBSTACLE) continue;
 
-            // ak niekto dal STOP_SIM, skonci
-            pthread_mutex_lock(&g_sim_lock);
-            int still_running = g_sim_running;
-            pthread_mutex_unlock(&g_sim_lock);
-            if (!still_running) break;
+                    // Ak sme v interactive mode, posielame kazdy krok len pre JEDNO policko a JEDNU replikaciu
+                    // aby sme nezahltili siet. Podla zadania "vykresluje sa aktualna trajektoria".
+                    if (params.mode == 0 && r == 1 && x == w/2 && y == h/2) {
+                        int cur_x = x, cur_y = y;
+                        int step_cnt = 0;
+                        int max_steps = w * h * 5; 
+                        
+                        while (step_cnt < max_steps && (cur_x != 0 || cur_y != 0)) {
+                            interactive_step_t ist = {cur_x, cur_y, (uint32_t)step_cnt};
+                            send_to_client(MSG_INTERACTIVE_STEP, &ist, sizeof(ist));
+                            
+                            simulate_one_step(&cur_x, &cur_y, world, has_obstacles, &probs);
+                            step_cnt++;
+                            usleep(10000); // spomalenie pre efekt
+                        }
+                        interactive_step_t ist = {cur_x, cur_y, (uint32_t)step_cnt};
+                        send_to_client(MSG_INTERACTIVE_STEP, &ist, sizeof(ist));
+                    }
 
-            // prejdime vsetky bunky sveta
-            for (uint32_t yy = 0; yy < h; yy++) {
-                for (uint32_t xx = 0; xx < w; xx++) {
-
-                    size_t idx = (size_t)yy * (size_t)w + (size_t)xx;
-
-                    int steps = simulate_walking((int)xx, (int)yy, (int)w, (int)h, center_x, center_y, &probs,max_steps);
-
-                    total_steps[idx] += (uint64_t)steps;
-
-                    if ((uint32_t)steps <= K) {
-                        success_k[idx] += 1;
+                    // Samotna vypoctova simulacia pre statistiky
+                    int steps = simulate_walking(x, y, world, has_obstacles, &probs, 1000000);
+                    int idx = y * w + x;
+                    total_steps[idx] += steps;
+                    if (steps <= (int)K) {
+                        success_k[idx] += 1.0;
                     }
                 }
             }
-
-            // progress po jednej replikacii
-            progress_t p;
-            p.repl_index = htonl(r);
-            p.repl_total = htonl(reps);
-            send_to_client(MSG_PROGRESS, &p, sizeof(p));
         }
 
-        // posli summary cells
-        for (uint32_t yy = 0; yy < h; yy++) {
-            for (uint32_t xx = 0; xx < w; xx++) {
+        // Vypocet finalnych statistik
+        double* avg_steps_final = (double*)malloc(w * h * sizeof(double));
+        double* prob_k_final = (double*)malloc(w * h * sizeof(double));
 
-                size_t idx = (size_t)yy * (size_t)w + (size_t)xx;
+        for (int i = 0; i < w * h; i++) {
+            avg_steps_final[i] = total_steps[i] / reps;
+            prob_k_final[i] = success_k[i] / reps;
 
-                int32_t cx = (int32_t)xx - (int32_t)center_x;
-                int32_t cy = (int32_t)yy - (int32_t)center_y;
-
-                int32_t value_fixed = 0;
-
-                if (view == 0) {
-                    double avg = (double)total_steps[idx] / (double)reps;
-                    value_fixed = (int32_t)(avg * 100.0);
-                } else {
-                    double prob = (double)success_k[idx] / (double)reps;
-                    value_fixed = (int32_t)(prob * 10000.0);
-                }
-
+            // Ak je klient v sumarnom mode, posleme mu data
+            if (params.mode == 1) {
                 summary_cell_t cell;
-                cell.x = (int32_t)htonl((uint32_t)cx);
-                cell.y = (int32_t)htonl((uint32_t)cy);
-                cell.value_fixed = (int32_t)htonl((uint32_t)value_fixed);
-
+                cell.x = i % w;
+                cell.y = i / w;
+                if (params.view == 0) { // avg_steps
+                    cell.value_fixed = (int32_t)(avg_steps_final[i] * 100);
+                } else { // prob_k
+                    cell.value_fixed = (int32_t)(prob_k_final[i] * 10000);
+                }
                 send_to_client(MSG_SUMMARY_CELL, &cell, sizeof(cell));
             }
         }
 
-        // koniec summary presne raz
-        send_to_client(MSG_SUMMARY_DONE, NULL, 0);
-        send_to_client(MSG_STATUS, "simulation finished",
-                       (uint32_t)strlen("simulation finished"));
+        if (params.mode == 0) {
+            send_to_client(MSG_INTERACTIVE_DONE, NULL, 0);
+        } else {
+            send_to_client(MSG_SUMMARY_DONE, NULL, 0);
+        }
+
+        // Ulozenie do suboru
+        if (strlen(params.save_file) > 0) {
+            save_results_to_file(params.save_file, w, h, avg_steps_final, prob_k_final);
+            
+            // Tiež uložíme svet pre neskorší reload (bod 5)
+            char world_save_name[128];
+            snprintf(world_save_name, sizeof(world_save_name), "world_%s.bin", params.save_file);
+            world_save_to_file(g_world, world_save_name);
+            printf("[server] Vysledky ulozene do %s, svet ulozeny do %s\n", params.save_file, world_save_name);
+        }
+
+        send_to_client(MSG_STATUS, "Simulacia dokoncena", (uint32_t)strlen("Simulacia dokoncena"));
 
         free(total_steps);
         free(success_k);
+        free(avg_steps_final);
+        free(prob_k_final);
 
-        // oznac ze simulacia uz nebezi
         pthread_mutex_lock(&g_sim_lock);
         g_sim_running = 0;
         pthread_mutex_unlock(&g_sim_lock);
@@ -182,193 +193,147 @@ static void* simulation_thread(void* arg)
     return NULL;
 }
 
-
-static int read_port(int argc, char** argv)
-{
-    if (argc < 2) return 5555;
-
-    int p = atoi(argv[1]);
-    if (p <= 0 || p > 65535) {
-        printf("[server] invalid port, using 5555\n");
-        return 5555;
-    }
-    return p;
-}
-
-int main(int argc, char** argv)
-{
+int main(int argc, char** argv) {
     srand(time(NULL));
+    int port = (argc > 1) ? atoi(argv[1]) : 5555;
 
-    int port = read_port(argc, argv);
+    int listen_fd = network_listen_on_port(port, 5);
+    if (listen_fd < 0) return 1;
 
-    int listen_fd = network_listen_on_port(port, 8);
-    if (listen_fd < 0) {
-        printf("[server] failed to start server\n");
-        return 1;
-    }
+    printf("[server] Server bezi na porte %d\n", port);
 
-    printf("[server] running on port %d\n", port);
-
-    pthread_t sim_thread;
-    if (pthread_create(&sim_thread, NULL, simulation_thread, NULL) != 0) {
-        printf("[server] failed to create simulation thread\n");
-        network_close_fd(&listen_fd);
-        return 1;
-    }
+    pthread_t sim_tid;
+    pthread_create(&sim_tid, NULL, simulation_thread, NULL);
 
     while (g_running) {
-        printf("[server] waiting for client...\n");
-
         int client_fd = network_accept_client(listen_fd);
-        if (client_fd < 0) {
-            printf("[server] accept failed\n");
-            continue;
-        }
+        if (client_fd < 0) continue;
 
+        printf("[server] Klient pripojeny.\n");
         pthread_mutex_lock(&g_client_lock);
-        // ak bol stary klient, zavrieme ho
-        if (g_client_fd >= 0) {
-            network_close_fd(&g_client_fd);
-        }
+        if (g_client_fd >= 0) network_close_fd(&g_client_fd);
         g_client_fd = client_fd;
         pthread_mutex_unlock(&g_client_lock);
 
-        printf("[server] client connected\n");
+        msg_header_t hdr;
+        void* payload = NULL;
 
-        // command loop
-        while (1) {
-            msg_header_t hdr;
-            void* payload = NULL;
-
-            int r = protocol_receive(client_fd, &hdr, &payload);
-
-            if (r == 0) {
-                printf("[server] client disconnected\n");
-                break;
-            }
-            if (r < 0) {
-                printf("[server] recv error\n");
-                break;
-            }
-
+        while (protocol_receive(client_fd, &hdr, &payload) > 0) {
             switch (hdr.type) {
+                case MSG_HELLO:
+                    send_to_client(MSG_WELCOME, NULL, 0);
+                    break;
 
-                case MSG_HELLO: {
-                    hello_t* h = (hello_t*)payload;
-                    uint32_t version = ntohl(h->version);
-                    printf("[server] HELLO version=%u\n", version);
+                case MSG_START_SIM: {
+                    start_sim_t* p = (start_sim_t*)payload;
+                    printf("[server] Spustam novu simulaciu: %dx%d, %d replikacii, K=%d\n", 
+                           p->world_w, p->world_h, p->replications, p->K);
+                    
+                    pthread_mutex_lock(&g_sim_lock);
+                    g_sim_params = *p;
+                    
+                    // Vytvorenie sveta
+                    if (g_world) world_free(g_world);
+                    if (p->world_type == 2) { // zo suboru
+                        g_world = world_load_from_file(p->world_file);
+                    } else {
+                        g_world = world_create(p->world_w, p->world_h);
+                        if (p->world_type == 1) { // nahodne prekazky
+                            do {
+                                world_generate_obstacles(g_world, 0.1);
+                            } while (!world_check_reachability(g_world));
+                        }
+                    }
 
-                    protocol_send(client_fd, MSG_WELCOME, NULL, 0);
+                    if (g_world) {
+                        g_sim_running = 1;
+                        pthread_cond_signal(&g_sim_cv);
+                        
+                        // Poslanie dat o svete klientovi pre vykreslovanie
+                        send_to_client(MSG_WORLD_DATA, g_world->grid, g_world->width * g_world->height);
+                    } else {
+                        send_to_client(MSG_STATUS, "Chyba: Nepodarilo sa vytvorit svet", 33);
+                    }
+                    pthread_mutex_unlock(&g_sim_lock);
                     break;
                 }
 
-                case MSG_START_SIM: {
-                    start_sim_t* s = (start_sim_t*)payload;
+                case MSG_RESTART_SIM: {
+                    restart_sim_t* r = (restart_sim_t*)payload;
+                    printf("[server] Opatovne spustenie simulacie: load=%s, replications=%d, save=%s\n",
+                           r->load_file, r->replications, r->save_file);
 
-                    // konverzia do host order a ulozenie
-                    start_sim_t host;
-                    host.world_w = ntohl(s->world_w);
-                    host.world_h = ntohl(s->world_h);
-                    host.replications = ntohl(s->replications);
-                    host.K = ntohl(s->K);
-
-                    host.p_up = ntohl(s->p_up);
-                    host.p_down = ntohl(s->p_down);
-                    host.p_left = ntohl(s->p_left);
-                    host.p_right = ntohl(s->p_right);
-
-                    host.mode = ntohl(s->mode);
-                    host.view = ntohl(s->view);
-
-                    printf("[server] START_SIM w=%u h=%u reps=%u K=%u\n", host.world_w, host.world_h, host.replications, host.K);
-
+                    // Pre 62 bodov a "opatovne spustenie uz ukoncenej simulacie" (bod 8 a 11):
+                    // "obnovi sa simulacia, ktorej vysledok bol ulozeny do suboru"
+                    // Kedze ukladame vysledky (avg_steps, prob_k) do CSV a svet do bin suboru,
+                    // a bod 8 hovori o nacitani sveta ("subor, z ktoreho bude simulacia nacitana"),
+                    // predpokladajme ze load_file je binarny svet (world_file).
+                    
                     pthread_mutex_lock(&g_sim_lock);
-                    g_sim_params = host;
-                    g_sim_running = 1;
-                    pthread_cond_signal(&g_sim_cv);
-                    pthread_mutex_unlock(&g_sim_lock);
+                    if (g_world) world_free(g_world);
+                    g_world = world_load_from_file(r->load_file);
 
-                    const char* msg = "start accepted";
-                    protocol_send(client_fd, MSG_STATUS, msg, (uint32_t)strlen(msg));
+                    if (g_world) {
+                        // Nastavime parametre pre novy beh
+                        g_sim_params.world_w = g_world->width;
+                        g_sim_params.world_h = g_world->height;
+                        g_sim_params.replications = r->replications;
+                        g_sim_params.world_type = 2; // from file
+                        strncpy(g_sim_params.world_file, r->load_file, 63);
+                        strncpy(g_sim_params.save_file, r->save_file, 63);
+                        
+                        // Ostatne parametre (P_up, K atd.) zostavaju z predchadzajucej simulacie 
+                        // alebo by sa mali tiez nacitat. Zadanie bod 8 je trosku nejednoznacne, 
+                        // ci sa nacitava len svet alebo komplet stav.
+                        
+                        g_sim_running = 1;
+                        pthread_cond_signal(&g_sim_cv);
+                        
+                        // Poslanie dat o svete klientovi pre vykreslovanie
+                        send_to_client(MSG_WORLD_DATA, g_world->grid, g_world->width * g_world->height);
+                        
+                        printf("[server] Simulacia obnovena.\n");
+                    } else {
+                        printf("[server] Chyba: Nepodarilo sa nacitat svet zo suboru %s\n", r->load_file);
+                        send_to_client(MSG_STATUS, "Chyba: Nepodarilo sa nacitat svet", 33);
+                    }
+                    pthread_mutex_unlock(&g_sim_lock);
                     break;
                 }
 
                 case MSG_SET_MODE: {
-                    set_mode_t* m = (set_mode_t*)payload;
-                    uint32_t mode = ntohl(m->mode);
-                    printf("[server] SET_MODE %u\n", mode);
-
+                    set_mode_t* sm = (set_mode_t*)payload;
                     pthread_mutex_lock(&g_sim_lock);
-                    g_sim_params.mode = mode;
+                    g_sim_params.mode = sm->mode;
                     pthread_mutex_unlock(&g_sim_lock);
-
-                    const char* msg = "mode changed";
-                    protocol_send(client_fd, MSG_STATUS, msg, (uint32_t)strlen(msg));
                     break;
                 }
 
-                case MSG_SET_VIEW: {
-                    set_view_t* v = (set_view_t*)payload;
-                    uint32_t view = ntohl(v->view);
-                    printf("[server] SET_VIEW %u\n", view);
-
-                    pthread_mutex_lock(&g_sim_lock);
-                    g_sim_params.view = view;
-                    pthread_mutex_unlock(&g_sim_lock);
-
-                    const char* msg = "view changed";
-                    protocol_send(client_fd, MSG_STATUS, msg, (uint32_t)strlen(msg));
-                    break;
-                }
-
-                case MSG_STOP_SIM: {
-                    printf("[server] STOP_SIM\n");
-
+                case MSG_STOP_SIM:
                     pthread_mutex_lock(&g_sim_lock);
                     g_sim_running = 0;
                     pthread_mutex_unlock(&g_sim_lock);
-
-                    const char* msg = "stop accepted";
-                    protocol_send(client_fd, MSG_STATUS, msg, (uint32_t)strlen(msg));
                     break;
-                }
 
-                case MSG_BYE: {
-                    printf("[server] BYE\n");
-                    free(payload);
-                    payload = NULL;
-                    goto disconnect_client;
-                }
-
-                default:
-                    printf("[server] unknown msg type=%u\n", hdr.type);
-                    break;
+                case MSG_BYE:
+                    goto disconnect;
             }
-
-            free(payload);
+            if (payload) { free(payload); payload = NULL; }
         }
 
-disconnect_client:
-        // odpoj klienta
+disconnect:
+        printf("[server] Klient odpojeny.\n");
+        if (payload) free(payload);
         pthread_mutex_lock(&g_client_lock);
-        if (g_client_fd == client_fd) {
-            network_close_fd(&g_client_fd);
-        }
+        network_close_fd(&g_client_fd);
         pthread_mutex_unlock(&g_client_lock);
-
-        network_close_fd(&client_fd);
     }
 
-    g_running = 0;
-
-    // zobud sim thread aby sa vedel ukoncit
-    pthread_mutex_lock(&g_sim_lock);
-    pthread_cond_signal(&g_sim_cv);
-    pthread_mutex_unlock(&g_sim_lock);
-
-    pthread_join(sim_thread, NULL);
     network_close_fd(&listen_fd);
+    g_running = 0;
+    pthread_cond_signal(&g_sim_cv);
+    pthread_join(sim_tid, NULL);
+    if (g_world) world_free(g_world);
 
-    printf("[server] stopped\n");
     return 0;
 }
