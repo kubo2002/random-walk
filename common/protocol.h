@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 
+
 /*
     JEDNODUCHY BINARY PROTOCOL (client <-> server)
 
@@ -25,12 +26,16 @@ typedef enum {
     MSG_SET_VIEW = 4,       // v summary mode: AVG_STEPS alebo PROB_K
     MSG_STOP_SIM = 5,       // ukonci simulaciu (server skonci simulaciu)
     MSG_BYE = 6,            // klient ide prec
+    MSG_RESTART_SIM = 7,    // opätovné spustenie
 
     // server -> client
     MSG_WELCOME = 100,      // odpoved na HELLO
     MSG_STATUS = 101,       // textovy status (napr. "started", "error")
     MSG_PROGRESS = 102,     // repl_index / repl_total
-    MSG_INTERACTIVE_STEP = 103, // pozicia chodca (len pre interactive)
+    MSG_INTERACTIVE_STEP = 220, // pozicia chodca (len pre interactive)
+    MSG_INTERACTIVE_DONE = 222,
+    MSG_INTERACTIVE_REP_DONE = 221,
+    MSG_WORLD_DATA = 230,   // server posiela cely grid (prekazky)
     MSG_SUMMARY_CELL = 104, // jedna bunka summary (x,y,value)
     MSG_SUMMARY_DONE = 105  // summary poslane cele
 } msg_type_t;
@@ -77,7 +82,20 @@ typedef struct {
 
     uint32_t mode;
     uint32_t view;
+    
+    uint32_t world_type; // 0=none, 1=random, 2=from_file
+    char world_file[64];
+    char save_file[64];
 } start_sim_t;
+
+/*
+    MSG_RESTART_SIM: parametre pre opätovné spustenie
+*/
+typedef struct {
+    uint32_t replications;
+    char load_file[64];
+    char save_file[64];
+} restart_sim_t;
 
 /*
     SET_MODE: iba prepnutie modu
@@ -108,7 +126,14 @@ typedef struct {
 typedef struct {
     int32_t x;
     int32_t y;
+    uint32_t step;    // poradove cislo kroku
 } interactive_step_t;
+
+typedef struct {
+    uint32_t rep_index;
+    uint32_t rep_total;
+    uint32_t steps;   // total steps taken in this replication
+} interactive_rep_done_t;
 
 /*
     SUMMARY_CELL: jedna bunka tabulky (x,y,value)
@@ -121,5 +146,6 @@ typedef struct {
     int32_t y;
     int32_t value_fixed;
 } summary_cell_t;
+
 
 #endif
