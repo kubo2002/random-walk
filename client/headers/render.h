@@ -1,8 +1,19 @@
-//
-// Created by kubo on 1/6/26.
-//
+#ifndef RENDER_H
+#define RENDER_H
 
-#ifndef RANDOM_WALK_RENDER_H
-#define RANDOM_WALK_RENDER_H
+#include <stdint.h>
 
-#endif //RANDOM_WALK_RENDER_H
+/*
+    Render modul pre "summary mode".
+    Ulozi si maticu a po SUMMARY_DONE ju vypise.
+
+    view:
+      0 = avg_steps (value_fixed je avg*100)
+      1 = prob_k    (value_fixed je prob*10000)
+*/
+
+void render_summary_begin(int w, int h, int view);
+void render_summary_cell(int x, int y, int value_fixed);
+void render_summary_end(int view);
+
+#endif

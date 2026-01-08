@@ -7,6 +7,7 @@
 #include "server_net.h"
 #include "protocol.h"
 #include "protocol_io.h"
+#include "../server/headers/simulation.h"
 
 /*
     SIMPLE SERVER STATE
@@ -53,10 +54,8 @@ static void* simulation_thread(void* arg)
 
     while (g_running) {
 
-        // pocka na START_SIM
+        // pockaj na START_SIM
         pthread_mutex_lock(&g_sim_lock);
-
-        // caka na signal spustenia simulacie z hlavneho vlakna
         while (g_running && g_sim_running == 0) {
             pthread_cond_wait(&g_sim_cv, &g_sim_lock);
         }
@@ -66,46 +65,115 @@ static void* simulation_thread(void* arg)
             break;
         }
 
-        // vyberieme parametre do lokalnych premennych (host order)
+        // skopiruj parametre do lokalnych premennych (host order)
+        uint32_t w    = g_sim_params.world_w;
+        uint32_t h    = g_sim_params.world_h;
         uint32_t reps = g_sim_params.replications;
+        uint32_t K    = g_sim_params.K;
+
+        move_probs_t probs;
+        probs.p_up    = g_sim_params.p_up;
+        probs.p_down  = g_sim_params.p_down;
+        probs.p_left  = g_sim_params.p_left;
+        probs.p_right = g_sim_params.p_right;
+
+        uint32_t view = g_sim_params.view; // 0=avg, 1=prob
         pthread_mutex_unlock(&g_sim_lock);
 
-        // simulacia "bezi"
-        const char* started = "simulation running";
-        send_to_client(MSG_STATUS, started, (uint32_t)strlen(started));
+        // status len raz
+        send_to_client(MSG_STATUS, "simulation running (summary)",(uint32_t)strlen("simulation running (summary)"));
 
-        for (uint32_t i = 1; i <= reps; i++) {
+        int center_x = (int)(w / 2);
+        int center_y = (int)(h / 2);
 
-            // !!!
-            // tu neskor pride realna logika random walk
-            // !!!
+        size_t n = (size_t)w * (size_t)h;
 
-            // zatial len simulujem pracu
-            usleep(300 * 1000); // 300 ms
+        uint64_t* total_steps = (uint64_t*)calloc(n, sizeof(uint64_t));
+        uint32_t* success_k   = (uint32_t*)calloc(n, sizeof(uint32_t));
 
-            progress_t p;
-            p.repl_index = htonl(i);
-            p.repl_total = htonl(reps);
-            send_to_client(MSG_PROGRESS, &p, sizeof(p));
+        if (!total_steps || !success_k) {
+            send_to_client(MSG_STATUS, "malloc failed", (uint32_t)strlen("malloc failed"));
+            free(total_steps);
+            free(success_k);
 
-            // ak niekto poslal STOP_SIM, tak skonci cyklus
+            pthread_mutex_lock(&g_sim_lock);
+            g_sim_running = 0;
+            pthread_mutex_unlock(&g_sim_lock);
+            continue;
+        }
+
+        int max_steps = (int)(w * h * 50);
+        if (max_steps < 1000) max_steps = 1000;
+
+        // vykonaj presne reps replikacii (len raz)
+        for (uint32_t r = 1; r <= reps; r++) {
+
+            // ak niekto dal STOP_SIM, skonci
             pthread_mutex_lock(&g_sim_lock);
             int still_running = g_sim_running;
             pthread_mutex_unlock(&g_sim_lock);
+            if (!still_running) break;
 
-            if (!still_running) {
-                const char* stopped = "simulation stopped";
-                send_to_client(MSG_STATUS, stopped, (uint32_t)strlen(stopped));
-                break;
+            // prejdime vsetky bunky sveta
+            for (uint32_t yy = 0; yy < h; yy++) {
+                for (uint32_t xx = 0; xx < w; xx++) {
+
+                    size_t idx = (size_t)yy * (size_t)w + (size_t)xx;
+
+                    int steps = simulate_walking((int)xx, (int)yy, (int)w, (int)h, center_x, center_y, &probs,max_steps);
+
+                    total_steps[idx] += (uint64_t)steps;
+
+                    if ((uint32_t)steps <= K) {
+                        success_k[idx] += 1;
+                    }
+                }
+            }
+
+            // progress po jednej replikacii
+            progress_t p;
+            p.repl_index = htonl(r);
+            p.repl_total = htonl(reps);
+            send_to_client(MSG_PROGRESS, &p, sizeof(p));
+        }
+
+        // posli summary cells
+        for (uint32_t yy = 0; yy < h; yy++) {
+            for (uint32_t xx = 0; xx < w; xx++) {
+
+                size_t idx = (size_t)yy * (size_t)w + (size_t)xx;
+
+                int32_t cx = (int32_t)xx - (int32_t)center_x;
+                int32_t cy = (int32_t)yy - (int32_t)center_y;
+
+                int32_t value_fixed = 0;
+
+                if (view == 0) {
+                    double avg = (double)total_steps[idx] / (double)reps;
+                    value_fixed = (int32_t)(avg * 100.0);
+                } else {
+                    double prob = (double)success_k[idx] / (double)reps;
+                    value_fixed = (int32_t)(prob * 10000.0);
+                }
+
+                summary_cell_t cell;
+                cell.x = (int32_t)htonl((uint32_t)cx);
+                cell.y = (int32_t)htonl((uint32_t)cy);
+                cell.value_fixed = (int32_t)htonl((uint32_t)value_fixed);
+
+                send_to_client(MSG_SUMMARY_CELL, &cell, sizeof(cell));
             }
         }
 
-        // koniec simulacie
+        // koniec summary presne raz
         send_to_client(MSG_SUMMARY_DONE, NULL, 0);
+        send_to_client(MSG_STATUS, "simulation finished",
+                       (uint32_t)strlen("simulation finished"));
 
-        const char* done = "simulation finished";
-        send_to_client(MSG_STATUS, done, (uint32_t)strlen(done));
+        free(total_steps);
+        free(success_k);
 
+        // oznac ze simulacia uz nebezi
         pthread_mutex_lock(&g_sim_lock);
         g_sim_running = 0;
         pthread_mutex_unlock(&g_sim_lock);
@@ -113,6 +181,7 @@ static void* simulation_thread(void* arg)
 
     return NULL;
 }
+
 
 static int read_port(int argc, char** argv)
 {
@@ -128,6 +197,8 @@ static int read_port(int argc, char** argv)
 
 int main(int argc, char** argv)
 {
+    srand(time(NULL));
+
     int port = read_port(argc, argv);
 
     int listen_fd = network_listen_on_port(port, 8);
@@ -155,7 +226,7 @@ int main(int argc, char** argv)
         }
 
         pthread_mutex_lock(&g_client_lock);
-        // ak bol stary klient, zavrieme ho (simple pravidlo: len 1 klient)
+        // ak bol stary klient, zavrieme ho
         if (g_client_fd >= 0) {
             network_close_fd(&g_client_fd);
         }
@@ -209,8 +280,7 @@ int main(int argc, char** argv)
                     host.mode = ntohl(s->mode);
                     host.view = ntohl(s->view);
 
-                    printf("[server] START_SIM w=%u h=%u reps=%u K=%u\n",
-                           host.world_w, host.world_h, host.replications, host.K);
+                    printf("[server] START_SIM w=%u h=%u reps=%u K=%u\n", host.world_w, host.world_h, host.replications, host.K);
 
                     pthread_mutex_lock(&g_sim_lock);
                     g_sim_params = host;

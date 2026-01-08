@@ -8,10 +8,12 @@
 #include "../server/headers/server_net.h"
 #include "protocol.h"
 #include "protocol_io.h"
+#include "render.h"
 
 static int g_fd = -1;
 static int g_running = 1;
-
+static int g_summary_active = 0;   // 1 = cakame na summary pre aktualny start
+static int g_current_view = 0;     // 0=avg, 1=prob
 /*
     Receiver thread:
     - stale cita spravy zo servera a vypisuje ich
@@ -50,8 +52,22 @@ static void* receiver_thread(void* arg)
             printf("[client] PROGRESS %u/%u\n", i, total);
         }
         else if (hdr.type == MSG_SUMMARY_DONE) {
-            printf("[client] SUMMARY_DONE\n");
+            if (g_summary_active) {
+                printf("[client] SUMMARY_DONE\n");
+                render_summary_end(g_current_view);
+                g_summary_active = 0;
+            }
         }
+        else if (hdr.type == MSG_SUMMARY_CELL) {
+            summary_cell_t* c = (summary_cell_t*)payload;
+
+            int32_t x = (int32_t)ntohl((uint32_t)c->x);
+            int32_t y = (int32_t)ntohl((uint32_t)c->y);
+            int32_t v = (int32_t)ntohl((uint32_t)c->value_fixed);
+
+            render_summary_cell((int)x, (int)y, (int)v);
+        }
+
         else {
             printf("[client] msg type=%u len=%u\n", hdr.type, hdr.payload_len);
         }
@@ -65,7 +81,7 @@ static void* receiver_thread(void* arg)
 /*
     Input thread:
     - cita prikazy z klavesnice a posiela ich serveru
-    - prikazy (pis do konzoly):
+    - prikazy:
         start
         mode 0
         mode 1
@@ -95,19 +111,23 @@ static void* input_thread(void* arg)
         if (strcmp(line, "start") == 0) {
             start_sim_t s;
 
+            int w = 11;
+            int h = 11;
+            int replications = 10; // avg_steps
+            int K = 20;
             s.world_w = htonl(11);
             s.world_h = htonl(11);
-            s.replications = htonl(10);
-            s.K = htonl(20);
-
+            s.replications = htonl((uint32_t)(replications));
+            s.K = htonl((uint32_t)K);
             s.p_up = htonl(250);
             s.p_down = htonl(250);
             s.p_left = htonl(250);
             s.p_right = htonl(250);
-
             s.mode = htonl(1); // summary
-            s.view = htonl(0); // avg_steps
+            s.view = htonl((uint32_t)g_current_view);
 
+            g_summary_active = 1;
+            render_summary_begin(w, h, g_current_view);
             protocol_send(g_fd, MSG_START_SIM, &s, sizeof(s));
         }
         else if (strncmp(line, "mode ", 5) == 0) {
@@ -118,9 +138,17 @@ static void* input_thread(void* arg)
         }
         else if (strncmp(line, "view ", 5) == 0) {
             int v = atoi(line + 5);
+            if (v != 0 && v != 1) {
+                printf("[client] view must be 0 or 1\n");
+                continue;
+            }
+
+            g_current_view = v;
             set_view_t vv;
             vv.view = htonl((uint32_t)v);
             protocol_send(g_fd, MSG_SET_VIEW, &vv, sizeof(vv));
+
+            printf("[client] view set to %d\n", v);
         }
         else if (strcmp(line, "stop") == 0) {
             protocol_send(g_fd, MSG_STOP_SIM, NULL, 0);
@@ -138,9 +166,10 @@ static void* input_thread(void* arg)
     return NULL;
 }
 
-static const char* read_ip(int argc, char** argv)
-{
-    if (argc < 2) return "127.0.0.1";
+static const char* read_ip(int argc, char** argv) {
+    if (argc < 2) {
+        return "127.0.0.1";
+    }
     return argv[1];
 }
 
