@@ -1,53 +1,60 @@
 # Používateľská príručka - Náhodná pochôdzka
 
-Tento dokument popisuje, ako spustiť a ovládať aplikáciu "Náhodná pochôdzka".
+Aplikácia "Náhodná pochôdzka" je simulačný nástroj umožňujúci skúmať správanie agenta v 2D prostredí pri náhodnom pohybe.
 
-## 1. Spustenie aplikácie
+## 1. Požiadavky a Inštalácia
+Pre spustenie aplikácie potrebujete mať nainštalovaný prekladač C (napr. GCC) a nástroj `cmake`.
 
-Aplikácia pozostáva z dvoch častí: **server** a **klient**. Pre správne fungovanie je potrebné najprv spustiť server.
-
-### Spustenie servera:
+### Kompilácia
+V koreňovom priečinku projektu vykonajte nasledujúce príkazy:
 ```bash
-./server [port]
+mkdir build
+cd build
+cmake ..
+make
 ```
-- `port`: (voliteľné) port, na ktorom bude server počúvať (predvolený je 5555).
+Po úspešnej kompilácii vzniknú v priečinku `build` dva spustiteľné súbory: `client` a `server`.
 
-### Spustenie klienta:
+## 2. Spustenie aplikácie
+Aplikácia sa spúšťa prostredníctvom klienta. Server je automaticky spúšťaný klientom v prípade potreby.
 ```bash
-./client [ip_adresa] [port]
+./client [IP_ADRESA] [PORT]
 ```
-- `ip_adresa`: IP adresa servera (pre lokálny beh použite 127.0.0.1).
-- `port`: port servera.
+- **IP_ADRESA**: Voliteľný parameter (predvolené 127.0.0.1).
+- **PORT**: Voliteľný parameter (predvolené 5555).
 
-## 2. Ovládanie (Klientske menu)
+## 3. Hlavné menu
+Po spustení klienta sa zobrazí hlavné menu s nasledujúcimi možnosťami:
+1. **Nova simulacia**: Umožňuje definovať parametre pre novú simuláciu.
+2. **Opatovne spustenie**: Načíta predchádzajúci uložený stav a pokračuje v simulácii.
+3. **Koniec**: Bezpečne ukončí klienta aj bežiaci proces servera.
 
-Po spustení a pripojení klienta sa zobrazí hlavné menu:
-
-1. **Nova simulacia**: Umožňuje nastaviť parametre pre nový beh.
-2. **Pripojit sa k simulacii**: Umožňuje sledovať už bežiacu simuláciu.
-3. **Opatovne spustenie simulacie**: Načíta predtým uložený svet a spustí simuláciu s novým počtom replikácií.
-4. **Koniec**: Korektne ukončí aplikáciu a odpojí sa od servera.
-
-## 3. Nastavenie simulácie
-
+## 4. Konfigurácia simulácie
 Pri vytváraní novej simulácie zadávate tieto parametre:
-- **Typ sveta**: 
-  - `0`: Bez prekážok (pohyb cez okraj vás vráti na opačnú stranu - wrap-around).
-  - `1`: S náhodnými prekážkami (cesta k stredu [0,0] je vždy zaručená).
-  - `2`: Načítať svet zo súboru.
-- **Rozmery sveta**: Šírka a výška (stred je vždy [0,0]).
-- **Počet replikácií**: Koľkokrát sa má simulácia zopakovať z každého políčka.
-- **Maximálny počet krokov (K)**: Limit pre výpočet pravdepodobnosti dosiahnutia cieľa.
-- **Pravdepodobnosti pohybu**: Zadáte 4 čísla (hore, dole, vľavo, vpravo), ktorých súčet musí byť 1000.
-- **Meno súboru pre výsledky**: Názov CSV súboru, kam server uloží finálne štatistiky.
-- **Mód**: 
-  - `Interaktívny`: Vidíte pohyb chodca v reálnom čase priamo v termináli.
-  - `Sumárny`: Server vypočíta štatistiky a pošle ich klientovi na zobrazenie.
+- **Mód simulácie**:
+    - `0 (Interactive)`: Vizualizácia pohybu jedného chodca v reálnom čase.
+    - `1 (Summary)`: Hromadná simulácia pre každú bunku mriežky s výslednou štatistickou tabuľkou.
+- **Typ sveta**:
+    - `0`: Bez okrajov (agent prechádza cez steny na opačnú stranu).
+    - `1`: S náhodnými prekážkami (server overuje priechodnosť k cieľu).
+    - `2`: Načítanie mapy zo súboru.
+- **Rozmery sveta**: Šírka a výška mriežky.
+- **Pravdepodobnosti pohybu**: Štyri celé čísla určujúce smer (hore, dole, vľavo, vpravo). Ich súčet musí byť presne 1000 (reprezentuje 100%).
+- **Replikácie a K**:
+    - Počet replikácií pre každú štartovaciu pozíciu.
+    - Limit krokov (K), po ktorom sa simulácia považuje za neúspešnú.
 
-## 4. Výsledky
+## 5. Legenda mapy (Interaktívny mód)
+V interaktívnom móde sa zobrazuje mriežka s nasledujúcimi znakmi:
+- `S`: Štartovacia pozícia agenta.
+- `C`: Aktuálna pozícia agenta.
+- `*`: Cieľ simulácie (stred mapy).
+- `O`: Prekážka (nepriechodná stena).
+- `x`: Cesta, ktorou agent už prešiel.
 
-Výsledky simulácie sa ukladajú na serveri do CSV súboru. Súbor obsahuje pre každé políčko:
-- Priemerný počet krokov do stredu.
-- Pravdepodobnosť dosiahnutia stredu v limite K krokov.
+## 6. Výstupy simulácie
+V sumárnom móde sa po skončení zobrazia v termináli tabuľky:
+- **Average Steps**: Priemerný počet krokov potrebných na dosiahnutie cieľa z danej bunky.
+- **Probability of K**: Pravdepodobnosť, že agent dosiahne cieľ do limitu K krokov.
 
-Okrem toho server automaticky ukladá binárny súbor sveta s predponou `world_`, ktorý môžete neskôr použiť vo voľbe "Opatovne spustenie simulacie".
+Všetky výsledky sú zároveň automaticky ukladané do textového súboru (formát CSV) špecifikovaného pri starte.

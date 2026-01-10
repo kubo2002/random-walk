@@ -1,83 +1,70 @@
 # Technická dokumentácia - Náhodná pochôdzka
 
-## 1. Štruktúra projektu
-Projekt je rozdelený do troch hlavných častí:
-- **Server**: Zodpovedá za simuláciu, prácu so svetom a ukladanie výsledkov.
-- **Klient**: Zabezpečuje interakciu s používateľom, vykresľovanie a posielanie príkazov.
-- **Common**: Spoločné hlavičkové súbory a komunikačný protokol.
+## 1. Úvod
+Tento projekt predstavuje simuláciu "Náhodnej pochôdzky" (Random Walk) v 2D priestore s využitím architektúry klient-server. Hlavným cieľom je simulovať pohyb agenta (chodca) na mriežke, kde sa snaží dosiahnuť cieľ (stred mapy) na základe definovaných pravdepodobností pohybu.
 
-### Moduly:
-- `server.c`: Hlavná logika servera, správa vlákien a sieťovej komunikácie.
-- `simulation.c`: Samotný algoritmus náhodnej pochôdzky.
-- `world.c`: Správa herného sveta (prekážky, generovanie, BFS, I/O).
-- `client.c`: Hlavný cyklus klienta.
-- `menu.c`: Spracovanie vstupov od používateľa.
-- `render.c`: Vykresľovanie sveta v termináli.
-- `protocol_io.c`: Nízkoúrovňové funkcie pre posielanie/prijímanie správ.
+## 2. Štruktúra projektu (UML)
 
-## 2. Architektúra a vlákna
-Aplikácia využíva viacvláknový model na strane servera aj klienta (knižnica `pthread`).
+Aplikácia je rozdelená na klientsku časť, serverovú časť a spoločné knižnice.
 
-### Server:
-1. **Hlavné vlákno (Main Thread)**:
-   - Inicializuje server socket (`network_listen_on_port`).
-   - V nekonečnom cykle čaká na pripojenie klienta (`accept`).
-   - Po pripojení klienta číta jeho správy v cykle pomocou `protocol_receive`.
-   - Reaguje na príkazy ako štart simulácie, zmena módu alebo stop.
-2. **Simulačné vlákno (Simulation Thread)**:
-   - Vytvorené pri štarte servera.
-   - Väčšinu času čaká na podmienkovú premennú (`g_sim_cv`).
-   - Po signále vykonáva simuláciu náhodnej pochôdzky.
-   - Priebežne posiela dáta klientovi cez socket.
-
-### Klient:
-1. **Hlavné vlákno (UI Thread)**:
-   - Zobrazuje textové menu a číta vstupy od používateľa.
-   - Posiela príkazy serveru.
-   - Po spustení simulácie čaká na jej ukončenie (synchronizácia cez ENTER).
-2. **Receiver vlákno**:
-   - Beží na pozadí počas celého spojenia.
-   - Prijíma správy od servera (statusy, progres, kroky interaktívneho módu, summary dáta).
-   - Volá funkcie modulu `render.c` na aktualizáciu zobrazenia.
-
-## 3. Komunikačný protokol (IPC)
-Komunikácia (Inter-Process Communication) prebieha cez **TCP sockety** (AF_INET, SOCK_STREAM).
-- **Socket**: Vytvorený pomocou systémového volania `socket()`.
-- **Protocol**: Vlastný binárny protokol definovaný v `protocol.h`.
-- **Marshalling**: Dáta sú prenášané v sieťovom poradí bajtov (Big Endian) pomocou funkcií `htonl/ntohl` pre zabezpečenie kompatibility.
-
-Štruktúra správy:
-```c
-typedef struct {
-    uint32_t type;         // Typ správy (napr. MSG_START_SIM)
-    uint32_t payload_len;  // Dĺžka dát nasledujúcich za hlavičkou
-} msg_header_t;
+```text
++-------------------+       TCP Socket (5555)       +-------------------+
+|      KLIENT       | <---------------------------> |      SERVER       |
++-------------------+                               +-------------------+
+| - Main Thread     |                               | - Main Thread     |
+| - Receiver Thread |                               | - Simulation Th.  |
++---------+---------+                               +---------+---------+
+          |                                                   |
+          v                                                   v
++---------+---------+                               +---------+---------+
+|     COMMON        |                               |     SERVER LIB    |
++-------------------+                               +-------------------+
+| - Protocol        |                               | - World logic     |
+| - Config          |                               | - Simulation      |
++-------------------+                               +-------------------+
 ```
-Za hlavičkou nasleduje voliteľný payload (napr. štruktúra `start_sim_t` alebo binárne dáta mapy sveta).
 
-## 4. Synchronizácia a kritické oblasti
-Na zabezpečenie konzistencie dát v multithreadovom prostredí používame:
+### Popis adresárovej štruktúry:
+- `client/`: Zdrojové kódy a hlavičkové súbory klienta.
+- `server/`: Zdrojové kódy a hlavičkové súbory servera.
+- `common/`: Spoločný komunikačný protokol a konštanty.
+- `documentation/`: Projektová dokumentácia.
 
-### Mutexy (`pthread_mutex_t`):
-- `g_client_lock`: Chráni prístup k file descriptoru klienta (`g_client_fd`). Zabezpečuje, že simulácia neposiela dáta do zatvoreného socketu a že naraz posiela dáta len jedno vlákno.
-- `g_sim_lock`: Chráni stavové premenné simulácie (`g_sim_running`, `g_sim_params`, `g_world`). Zabezpečuje, aby sa parametre nemenili počas prebiehajúceho výpočtu.
+## 3. Procesy aplikácie
+Aplikácia pozostáva z dvoch hlavných procesov:
+1.  **Rodičovský proces (Klient)**: Zodpovedá za interakciu s používateľom (vstupy, menu), vizualizáciu dát a správu perzistentných údajov (prikazuje serveru ukladanie/načítanie stavu). Pri štarte simulácie vytvára proces servera (bod P7).
+2.  **Potomkovský proces (Server)**: Vykonáva simulačnú logiku, spravuje herný svet (generovanie prekážok, kolízie) a vykonáva výpočtovo náročné simulácie. Je spustený klientom pomocou systémového volania `fork()` a následného `exec()` (bod P8).
 
-### Podmienkové premenné (`pthread_cond_t`):
-- `g_sim_cv`: Používa sa na signalizáciu medzi hlavným vláknom (ktoré prijme príkaz na štart) a simulačným vláknom (ktoré čaká na prácu). Tým sa šetrí CPU, keď server nerobí simuláciu.
+### Životný cyklus servera (P5)
+Proces server existuje, pokiaľ beží ním spravovaná simulácia, bez ohľadu na to, či klient, ktorý ho vytvoril, stále beží. Ak klient počas simulácie zanikne, server dokončí výpočet a následne zanikne. Ak simulácia skončí, proces server zaniká.
 
-## 5. Algoritmy
-- **Náhodná pochôdzka**:
-  - Implementovaná v `simulation.c`.
-  - Každý krok sa náhodne vyberá smer (hore, dole, vľavo, vpravo) podľa zadaných pravdepodobností.
-  - **Wrap-around**: Ak je svet bez prekážok, pri prekročení hranice sa objekt objaví na opačnej strane (modulo logika).
-  - **Prekážky**: Ak je svet s prekážkami, krok na políčko typu `CELL_OBSTACLE` (alebo mimo hraníc) je ignorovaný (objekt zostáva stáť).
-- **BFS (Breadth-First Search)**:
-  - Použitý v `world.c` pri generovaní sveta.
-  - Zabezpečuje, že z každého voľného políčka existuje cesta do cieľa [0,0]. Ak nie, svet sa pregeneruje.
+## 4. Vlákna a ich účel
+Obidve časti aplikácie využívajú vlákna (POSIX Threads) na zabezpečenie asynchrónneho správania:
+- **Klient (receiver_thread)**: Toto vlákno beží na pozadí a neustále počúva na sockete. Prijíma správy od servera (progres, kroky simulácie, výsledky) a aktualizuje stav rozhrania, zatiaľ čo hlavné vlákno čaká na vstup používateľa alebo vykresľuje mapu.
+- **Server (simulation_thread)**: Zabezpečuje samotný výpočet náhodnej pochôdzky. Oddelenie do samostatného vlákna umožňuje serveru v hlavnom vlákne stále prijímať riadiace príkazy od klienta (napr. ukončenie) aj počas bežiaceho výpočtu.
 
-## 6. Generatívna umelá inteligencia
-Pri vypracovaní semestrálnej práce bola použitá umelá inteligencia (Junie od JetBrains) na:
-- Generovanie kostry sieťovej komunikácie.
-- Implementáciu BFS algoritmu pre overenie dosiahnuteľnosti.
-- Formátovanie dokumentácie a písanie komentárov v slovenskom jazyku.
-Všetok kód bol následne manuálne skontrolovaný a upravený tak, aby spĺňal funkčné požiadavky zadania pre 62 bodov.
+## 5. Medziprocesová komunikácia (IPC)
+V projekte sú využité nasledujúce typy IPC (bod P9):
+1.  **TCP Sockety**: Primárny komunikačný kanál medzi klientom a serverom. Používajú sa na prenos štruktúrovaných správ. TCP rozhranie (IP adresa a port) sa definuje pri vytvorení procesu server (bod P10).
+2.  **Správa procesov (fork/exec)**: Mechanizmus na vytvorenie a spustenie serverového procesu priamo z klienta.
+3.  **Signály/Ukončenie**: Korektné ukončenie procesov pri zatvorení aplikácie.
+
+*Poznámka: V aktuálnej verzii sa nepoužíva zdieľaná pamäť ani dátovody (pipes), komunikácia je plne zabezpečená pomocou sieťových socketov.*
+
+## 6. Synchronizačné problémy a riešenia
+Pri použití viacerých vlákien v serveri vznikali nasledujúce problémy:
+-   **Prístup k sieťovému socketu**: Aby nedochádzalo ku kolízii pri odosielaní správ zo simulačného vlákna a hlavného vlákna servera, bol implementovaný mutex `g_client_lock`.
+-   **Synchronizácia štartu simulácie**: Simulačné vlákno musí čakať, kým klient nepošle kompletnú konfiguráciu. Toto je vyriešené pomocou podmienkovej premennej (`pthread_cond_t g_sim_cv`) a mutexu `g_sim_lock`. Vlákno spí, kým nedostane signál o pripravenosti dát.
+
+## 7. Ďalšie kľúčové problémy
+-   **Priechodnosť sveta**: Pri generovaní náhodných prekážok bolo nutné zabezpečiť, aby bol cieľ (stred) dosiahnuteľný z každej voľnej bunky. Na tento účel bol implementovaný algoritmus **BFS** (Breadth-First Search).
+-   **Toroidný svet**: Implementácia sveta bez okrajov vyžadovala ošetrenie pretečenia súradníc (modulo operácie), aby sa chodec po prejdení okraja objavil na opačnej strane.
+-   **Perzistencia**: Implementácia ukladania a načítania binárneho stavu simulácie umožnila pokračovať v prerušenej práci.
+
+## 8. Implementačné detaily simulácie
+- **Pohyb**: Chodec sa pohybuje v 4 smeroch na základe zadaných pravdepodobností (v promile).
+- **Svet**: Podporuje toroidný svet, svet s prekážkami a načítanie zo súboru.
+
+## 9. Perzistencia dát
+- **Stav simulácie**: Binárny súbor `.state.bin` pre obnovu.
+- **Výsledky**: CSV súbor so štatistikami pre sumárny mód.
