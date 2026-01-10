@@ -11,179 +11,122 @@
     - cells je pole w*h hodnot (value_fixed)
 */
 
-// premenne pre summary mod
+// Pomocne premenne pre tabulky
 static int g_w = 0;
 static int g_h = 0;
-static int g_cx = 0;
-static int g_cy = 0;
+static int32_t* g_cells_avg = NULL;
+static int32_t* g_cells_prob = NULL;
 static int g_got_any_cell = 0;
-static int32_t* g_cells = NULL;
 
-//premenne pre interaktivny mod
+// Premenne pre interakciu
 static int g_iw = 0;
 static int g_ih = 0;
-static int g_icx = 0;
-static int g_icy = 0;
-static char* g_grid = NULL;   // 2D mapa iw*ih
+static char* g_grid = NULL;
 static int g_has_pos = 0;
 static int g_last_x = 0;
 static int g_last_y = 0;
 
-
+// Uvolni pamat tabuliek
 static void free_cells(void)
 {
-    free(g_cells);
-    g_cells = NULL;
-    g_w = 0;
-    g_h = 0;
-    g_cx = 0;
-    g_cy = 0;
+    if (g_cells_avg) free(g_cells_avg);
+    if (g_cells_prob) free(g_cells_prob);
+    g_cells_avg = NULL;
+    g_cells_prob = NULL;
+    g_w = 0; g_h = 0;
 }
 
+// Priprava na summary mod
 void render_summary_begin(int w, int h, int view)
 {
     (void)view;
-
-    // reset stareho bufferu
     free_cells();
-
-    g_w = w;
-    g_h = h;
-    // V novom svete je stred vzdy [0,0], mapujeme suradnice priamo
-    g_cx = 0; 
-    g_cy = 0;
-
-    g_cells = (int32_t*)malloc((size_t)g_w * (size_t)g_h * sizeof(int32_t));
-    if (!g_cells) {
-        printf("[client] render: malloc failed\n");
-        free_cells();
+    if (w <= 0 || h <= 0) {
         return;
     }
 
-    // nastavime default hodnoty (napr. -1 = "neprislo")
+    g_w = w; g_h = h;
+    g_cells_avg = (int32_t*)malloc((size_t)g_w * (size_t)g_h * sizeof(int32_t));
+    g_cells_prob = (int32_t*)malloc((size_t)g_w * (size_t)g_h * sizeof(int32_t));
+    
     for (int i = 0; i < g_w * g_h; i++) {
-        g_cells[i] = -1;
+        g_cells_avg[i] = -1;
+        g_cells_prob[i] = -1;
     }
-
-    printf("[client] summary buffer ready (%dx%d)\n", g_w, g_h);
     g_got_any_cell = 0;
 }
 
-/*
-    x,y su so stredom v (0,0), napr. -5..+5 pri 11x11
-    my to mapneme na indexy 0..w-1 / 0..h-1
-*/
+// Prisla bunka zo servera
 void render_summary_cell(int x, int y, int value_fixed)
 {
-    if (!g_cells) return;
+    if (!g_cells_avg) return;
+    if (x < 0 || x >= g_w || y < 0 || y >= g_h) return;
 
-    // Suradnice od servera su uz indexy 0..w-1
-    int xx = x;
-    int yy = y;
-
-    if (xx < 0 || xx >= g_w || yy < 0 || yy >= g_h) {
-        return;
+    int idx = y * g_w + x;
+    if (value_fixed == -2) {
+        g_cells_avg[idx] = -2;
+        g_cells_prob[idx] = -2;
+    } else if (value_fixed >= 2000000) {
+        g_cells_prob[idx] = value_fixed - 2000000;
+    } else {
+        g_cells_avg[idx] = value_fixed;
     }
-
-    int idx = yy * g_w + xx;
-    g_cells[idx] = (int32_t)value_fixed;
     g_got_any_cell = 1;
 }
 
-static void print_header(int view)
-{
-    if (view == 0) {
-        printf("\n===== SUMMARY: AVG_STEPS (value_fixed = avg*100) =====\n");
-        printf("format: number = value_fixed/100.00\n\n");
-    } else {
-        printf("\n===== SUMMARY: PROB_K (value_fixed = prob*10000) =====\n");
-        printf("format: number = value_fixed/10000.0000\n\n");
-    }
-}
-
+// Vykresli tabulky
 void render_summary_end(int view)
 {
-    if (!g_got_any_cell) {
-        // neprisla ziadna bunka -> nebudeme tlacit prazdnu tabulku
-        printf("[client] summary_end ignored (no cells received)\n");
-        return;
-    }
+    (void)view;
+    if (!g_got_any_cell || !g_cells_avg) return;
 
-    if (!g_cells) {
-        return;
-    }
+    for (int v_mode = 0; v_mode <= 1; v_mode++) {
+        if (v_mode == 0) printf("\n--- PRIEMERNE KROKY ---\n");
+        else printf("\n--- PRAVDEPODOBNOST DO K KROKOV ---\n");
 
-    print_header(view);
+        printf("     ");
+        for (int x = 0; x < g_w; x++) printf("%8d", x);
+        printf("\n     ");
+        for (int x = 0; x < g_w; x++) printf("--------");
+        printf("\n");
 
-    /*
-        vypis:
-        - y vypiseme od +max po -max (aby to vyzeralo ako graf)
-        - x ide zlava doprava
-    */
-
-    // x os (hlavicka)
-    printf("     ");
-    for (int x = -g_cx; x <= g_cx; x++) {
-        printf("%8d", x);
-    }
-    printf("\n");
-
-    // ciara
-    printf("     ");
-    for (int x = -g_cx; x <= g_cx; x++) {
-        printf("--------");
-    }
-    printf("\n");
-
-    for (int y = g_cy; y >= -g_cy; y--) {
-        printf("%3d |", y);
-
-        for (int x = -g_cx; x <= g_cx; x++) {
-            int xx = x + g_cx;
-            int yy = y + g_cy;
-            int idx = yy * g_w + xx;
-
-            int32_t v = g_cells[idx];
-            if (v < 0) {
-                printf("%8s", "NA");
-            } else {
-                if (view == 0) {
-                    // avg_steps * 100
-                    double d = (double)v / 100.0;
-                    printf("%8.2f", d);
-                } else {
-                    // prob_k * 10000
-                    double d = (double)v / 10000.0;
-                    printf("%8.4f", d);
+        for (int y = 0; y < g_h; y++) {
+            printf("%3d |", y);
+            for (int x = 0; x < g_w; x++) {
+                int idx = y * g_w + x;
+                int32_t v = (v_mode == 0) ? g_cells_avg[idx] : g_cells_prob[idx];
+                if (v == -2) printf("%8s", "O");
+                else if (v < 0) printf("%8s", ".");
+                else {
+                    if (v_mode == 0) printf("%8.2f", (double)v / 100.0);
+                    else printf("%8.4f", (double)v / 10000.0);
                 }
             }
+            printf("\n");
         }
-        printf("\n");
     }
+    printf("\n");
+}
 
-    printf("\n===== END SUMMARY =====\n\n");
+void render_summary_final(void) {
     free_cells();
 }
 
-
-
+// Interakcia - uvolnenie
 static void interactive_free(void)
 {
-    free(g_grid);
+    if (g_grid) free(g_grid);
     g_grid = NULL;
     g_iw = g_ih = 0;
-    g_icx = g_icy = 0;
     g_has_pos = 0;
 }
 
+// Nakresli mapu do terminalu
 static void interactive_draw(void)
 {
     if (!g_grid) return;
+    printf("\033[H\033[J"); // Vymaz obrazovku
 
-    // Vyčistenie obrazovky pre plynulejšiu simuláciu
-    printf("\033[H\033[J");
-
-    // vypis od y=+max po y=-max (ako pri summary)
     for (int yy = 0; yy < g_ih; yy++) {
         for (int xx = 0; xx < g_iw; xx++) {
             putchar(g_grid[yy * g_iw + xx]);
@@ -194,102 +137,65 @@ static void interactive_draw(void)
     putchar('\n');
 }
 
+// Start interakcie
 void render_interactive_begin(int w, int h)
 {
     interactive_free();
+    if (w <= 0 || h <= 0) return;
 
-    g_iw = w;
-    g_ih = h;
-    g_icx = 0; // Stred je vzdy mapovany na indexy podla servera
-    g_icy = 0;
-
+    g_iw = w; g_ih = h;
     g_grid = (char*)malloc((size_t)g_iw * (size_t)g_ih);
-    if (!g_grid) {
-        printf("[client] interactive: malloc failed\n");
-        interactive_free();
-        return;
-    }
+    for (int i = 0; i < g_iw * g_ih; i++) g_grid[i] = '.';
 
-    // vypln bodkami
-    for (int i = 0; i < g_iw * g_ih; i++) {
-        g_grid[i] = '.';
-    }
-
-    // oznac ciel (stred) znakom O
-    if (g_icx < g_iw && g_icy < g_ih) {
-        g_grid[g_icy * g_iw + g_icx] = 'O';
-    }
-
-    printf("[client] interaktivna mapa pripravena (%dx%d)\n", g_iw, g_ih);
+    // Ciel je stred
+    if (w/2 < g_iw && h/2 < g_ih) g_grid[(h/2) * g_iw + (w/2)] = '*';
 }
 
+// Prisli prekazky
 void render_interactive_world_data(const uint8_t* data, uint32_t len)
 {
     if (!g_grid || len != (uint32_t)(g_iw * g_ih)) return;
-
     for (int i = 0; i < g_iw * g_ih; i++) {
-        if (data[i] == 1) { // CELL_OBSTACLE
-            g_grid[i] = 'X';
-        }
+        if (data[i] == 1) g_grid[i] = 'O';
     }
-    // Ciel vzdy ostane O
-    g_grid[g_icy * g_iw + g_icx] = 'O';
-    
+    g_grid[(g_ih/2) * g_iw + (g_iw/2)] = '*';
     interactive_draw();
 }
 
+// Chodec sa pohol
 void render_interactive_step(int x, int y)
 {
     if (!g_grid) return;
-
-    // Server posiela indexy 0..w-1
-    int xx = x;
-    int yy = y;
-
+    int xx = x + (g_iw / 2);
+    int yy = y + (g_ih / 2);
     if (xx < 0 || xx >= g_iw || yy < 0 || yy >= g_ih) return;
 
-    // Zanechávanie stopy: predošlá pozícia ostane označená malým 'x' (stopa)
-    // namiesto toho, aby sme ju mazali (bodka).
-    if (g_has_pos) {
-        int px = g_last_x;
-        int py = g_last_y;
-
+    if (!g_has_pos) {
+        g_grid[yy * g_iw + xx] = 'S'; // Start
+    } else {
+        int px = g_last_x + (g_iw / 2);
+        int py = g_last_y + (g_ih / 2);
         if (px >= 0 && px < g_iw && py >= 0 && py < g_ih) {
-            // Ak sme boli na cieli, vrátime O, inak necháme stopu 'x'
-            if (px == 0 && py == 0) g_grid[py * g_iw + px] = 'O';
-            else g_grid[py * g_iw + px] = 'x'; 
+            if (px == g_iw/2 && py == g_ih/2) g_grid[py * g_iw + px] = '*';
+            else if (g_grid[py * g_iw + px] != 'S') g_grid[py * g_iw + px] = 'x'; 
         }
+        if (xx == g_iw/2 && yy == g_ih/2) g_grid[yy * g_iw + xx] = '*';
+        else g_grid[yy * g_iw + xx] = 'C'; 
     }
-
-    // Nastav aktuálnu pozíciu chodca
-    g_grid[yy * g_iw + xx] = '*';
-    g_last_x = x;
-    g_last_y = y;
-    g_has_pos = 1;
-
-    // Prekresli mapu
+    g_last_x = x; g_last_y = y; g_has_pos = 1;
     interactive_draw();
 }
 
 void render_interactive_end(void)
 {
-    printf("[client] interactive finished\n");
     interactive_free();
 }
 
 void render_interactive_reset(void)
 {
     if (!g_grid) return;
-
-    // clear all to '.'
-    for (int i = 0; i < g_iw * g_ih; i++) {
-        g_grid[i] = '.';
-    }
-
-    // goal
-    g_grid[g_icy * g_iw + g_icx] = 'O';
-
+    for (int i = 0; i < g_iw * g_ih; i++) g_grid[i] = '.';
+    g_grid[(g_ih/2) * g_iw + (g_iw/2)] = '*';
     g_has_pos = 0;
-    printf("[client] interactive: next replication\n");
     interactive_draw();
 }

@@ -10,9 +10,8 @@
 // Typy poloziek v menu
 typedef enum {
     MENU_NEW_SIM = 1,
-    MENU_JOIN_SIM = 2,
-    MENU_RESTART_SIM = 3,
-    MENU_EXIT = 4
+    MENU_RESTART_SIM = 2,
+    MENU_EXIT = 3
 } menu_choice_t;
 
 // Funkcie menu

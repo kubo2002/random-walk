@@ -16,13 +16,28 @@ static int g_socket_fd = -1;
 static int g_mode = 0; // 0 interactive, 1 summary
 static int g_view = 0; // 0 avg, 1 prob
 
-// Vlakno na prijimanie sprav zo servera
+// Vlakno na prijimanie sprav od servera
 void* receiver_thread(void* arg) {
     (void)arg;
     msg_header_t hdr;
     void* payload = NULL;
 
-    while (g_running && protocol_receive(g_socket_fd, &hdr, &payload) > 0) {
+    while (g_running) {
+        int fd = g_socket_fd;
+        // v pripade ze by sa nepodarilo vytvorit deskriptor soketu
+        if (fd < 0) {
+            usleep(100000);
+            continue;
+        }
+
+        int res = protocol_receive(fd, &hdr, &payload);
+        if (res <= 0) {
+            // Server sa odpojil alebo nieco zlyhalo
+            usleep(100000);
+            continue;
+        }
+
+        // na zaklade typu spravy sa
         switch (hdr.type) {
             case MSG_STATUS:
                 printf("\n[server] %s\n", (char*)payload);
@@ -31,6 +46,12 @@ void* receiver_thread(void* arg) {
                 progress_t* p = (progress_t*)payload;
                 printf("\r[progres] %u / %u replikacii", p->repl_index, p->repl_total);
                 fflush(stdout);
+                if (g_mode == 1) {
+                    render_summary_end(g_view);
+                }
+                if (p->repl_index == p->repl_total) {
+                    printf("\n");
+                }
                 break;
             }
             case MSG_INTERACTIVE_STEP: {
@@ -49,16 +70,24 @@ void* receiver_thread(void* arg) {
             }
             case MSG_SUMMARY_DONE:
                 render_summary_end(g_view);
-                printf("\n[klient] Simulacia dokoncena. Stlacte ENTER pre navrat do menu.\n");
+                render_summary_final();
+                printf("\n[klient] Hotovo! Stlac ENTER a ideme spat do menu.\n");
                 break;
             case MSG_INTERACTIVE_DONE:
                 render_interactive_end();
-                printf("\n[klient] Interaktivna simulacia dokoncena. Stlacte ENTER pre navrat do menu.\n");
+                printf("\n[klient] Koniec simulacie. Stlac ENTER pre menu.\n");
+                break;
+            case MSG_SERVER_EXIT:
+                printf("\n[klient] Server process skoncil.\n");
+                if (g_socket_fd >= 0) {
+                    close(g_socket_fd);
+                    g_socket_fd = -1;
+                }
                 break;
         }
         if (payload) { free(payload); payload = NULL; }
     }
-    g_running = 0;
+    if (payload) free(payload);
     return NULL;
 }
 
@@ -66,73 +95,89 @@ int main(int argc, char** argv) {
     char* ip = (argc > 1) ? argv[1] : "127.0.0.1";
     int port = (argc > 2) ? atoi(argv[2]) : 5555;
 
-    g_socket_fd = net_connect_to_server(ip, port);
-    if (g_socket_fd < 0) {
-        printf("Nepodarilo sa pripojit k serveru.\n");
-        return 1;
-    }
-
-    protocol_send(g_socket_fd, MSG_HELLO, NULL, 0);
-
     pthread_t recv_tid;
-    pthread_create(&recv_tid, NULL, receiver_thread, NULL);
+    int recv_tid_created = 0;
 
     while (g_running) {
         menu_print_main();
         int choice = menu_get_choice();
 
-        if (choice == MENU_NEW_SIM) {
-            start_sim_t params;
-            char world_file[64], save_file[64];
-            int world_type;
-            menu_get_sim_params(&params, world_file, save_file, &world_type);
-            
-            params.world_type = (uint32_t)world_type;
-            strncpy(params.world_file, world_file, 63);
-            strncpy(params.save_file, save_file, 63);
-            
-            g_mode = params.mode;
-            g_view = params.view;
+        if (choice == MENU_NEW_SIM || choice == MENU_RESTART_SIM) {
+            if (g_socket_fd >= 0) {
+                protocol_send(g_socket_fd, MSG_BYE, NULL, 0);
+                close(g_socket_fd);
+                g_socket_fd = -1;
+            }
 
-            if (g_mode == 0) render_interactive_begin(params.world_w, params.world_h);
-            else render_summary_begin(params.world_w, params.world_h, g_view);
+            pid_t pid = fork();
+            if (pid == 0) {
+                execl("./server", "./server", "5555", NULL);
+                perror("execl server failed");
+                exit(1);
+            } else if (pid > 0) {
+                printf("[client] Zapinam server (pid=%d)...\n", pid);
+                
+                int connected = 0;
+                for (int i = 0; i < 10; i++) {
+                    usleep(200000); 
+                    g_socket_fd = net_connect_to_server(ip, port);
+                    if (g_socket_fd >= 0) {
+                        connected = 1;
+                        break;
+                    }
+                }
 
-            protocol_send(g_socket_fd, MSG_START_SIM, &params, sizeof(params));
+                if (!connected) {
+                    printf("Nepodarilo sa pripojit, server asi nespolupracuje.\n");
+                    continue;
+                }
+                protocol_send(g_socket_fd, MSG_HELLO, NULL, 0);
+                
+                if (!recv_tid_created) {
+                    pthread_create(&recv_tid, NULL, receiver_thread, NULL);
+                    recv_tid_created = 1;
+                }
+            } else {
+                perror("fork failed");
+            }
+
+            if (choice == MENU_NEW_SIM) {
+                start_sim_t params;
+                char world_file[64], save_file[64];
+                int world_type;
+                menu_get_sim_params(&params, world_file, save_file, &world_type);
+                
+                params.world_type = (uint32_t)world_type;
+                strncpy(params.world_file, world_file, 63);
+                strncpy(params.save_file, save_file, 63);
+                
+                g_mode = params.mode;
+                g_view = params.view;
+
+                if (g_mode == 0) render_interactive_begin(params.world_w, params.world_h);
+                else render_summary_begin(params.world_w, params.world_h, g_view);
+
+                protocol_send(g_socket_fd, MSG_START_SIM, &params, sizeof(params));
+            } else {
+                restart_sim_t r;
+                menu_get_restart_params(r.load_file, &r.replications, r.save_file);
+                protocol_send(g_socket_fd, MSG_RESTART_SIM, &r, sizeof(r));
+            }
             
-            // Cakanie na koniec simulacie, aby menu neprekrylo vystup
-            printf("[client] Simulacia bezi, pockajte na dokoncenie...\n");
-            
-            // Po skonceni simulacie (ked receiver thread vypise spravu),
-            // chceme aby si user mohol v klude pozriet vysledok.
-            // Preto tu pridame getchar() na "ENTER" pre navrat.
-            while (getchar() != '\n'); // vycisti buffer
-            getchar(); // pockaj na enter
-            
-        } else if (choice == MENU_JOIN_SIM) {
-            printf("Pripajanie k beziacej simulacii...\n");
-            // Server automaticky posle data novemu klientovi
-        } else if (choice == MENU_RESTART_SIM) {
-            restart_sim_t r;
-            menu_get_restart_params(r.load_file, &r.replications, r.save_file);
-            protocol_send(g_socket_fd, MSG_RESTART_SIM, &r, sizeof(r));
-            
-            printf("[client] Restart simulacie bezi, pockajte na dokoncenie...\n");
+            printf("[client] Simulacia bezi, cakam na koniec...\n");
             while (getchar() != '\n'); 
             getchar(); 
-
+            
         } else if (choice == MENU_EXIT) {
-            protocol_send(g_socket_fd, MSG_BYE, NULL, 0);
+            if (g_socket_fd >= 0) {
+                protocol_send(g_socket_fd, MSG_BYE, NULL, 0);
+            }
             g_running = 0;
             break;
-        } else if (choice == 5) { // Skryta volba pre zmenu zobrazenia
-            g_view = 1 - g_view;
-            set_view_t sv = {(uint32_t)g_view};
-            protocol_send(g_socket_fd, MSG_SET_VIEW, &sv, sizeof(sv));
-            printf("Zobrazenie zmenene na: %s\n", g_view == 0 ? "AvgSteps" : "ProbK");
         }
     }
 
-    close(g_socket_fd);
-    pthread_join(recv_tid, NULL);
+    if (g_socket_fd >= 0) close(g_socket_fd);
+    if (recv_tid_created) pthread_join(recv_tid, NULL);
     return 0;
 }
