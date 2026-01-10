@@ -3,7 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 
-// Vytvori novy svet danej velkosti
+// Vytvori novy svet, alokuje pamat
 world_t* world_create(int w, int h) {
     world_t* world = (world_t*)malloc(sizeof(world_t));
     if (!world) return NULL;
@@ -20,7 +20,7 @@ world_t* world_create(int w, int h) {
     return world;
 }
 
-// Uvolni pamat sveta
+// dealokuje
 void world_free(world_t* world) {
     if (world) {
         if (world->grid) free(world->grid);
@@ -28,30 +28,32 @@ void world_free(world_t* world) {
     }
 }
 
-// Nastavi typ policka na danych suradniciach
+// Nastavi co je na danych suradniciach
 void world_set_cell(world_t* world, int x, int y, cell_type_t type) {
     if (x >= 0 && x < world->width && y >= 0 && y < world->height) {
         world->grid[y * world->width + x] = (uint8_t)type;
     }
 }
 
-// Ziska typ policka na danych suradniciach
+// Zisti co je na danych suradniciach
 cell_type_t world_get_cell(world_t* world, int x, int y) {
     if (x >= 0 && x < world->width && y >= 0 && y < world->height) {
         return (cell_type_t)world->grid[y * world->width + x];
     }
-    return CELL_OBSTACLE; // Mimo sveta povazujeme za prekazku (ak nie je wrap-around)
+    return CELL_OBSTACLE; // Mimo mapy je prekazka
 }
 
-// Nahodne vygeneruje prekazky s danou hustotou
+// Nahadze tam nejake prekazky
 void world_generate_obstacles(world_t* world, double density) {
-    // Najprv vsetko vymazeme
     memset(world->grid, 0, world->width * world->height);
     
+    int target_x = world->width / 2;
+    int target_y = world->height / 2;
+
     for (int y = 0; y < world->height; y++) {
         for (int x = 0; x < world->width; x++) {
-            // Stred [0,0] nesmie mat prekazku
-            if (x == 0 && y == 0) continue;
+            // Stred musi byt volny!
+            if (x == target_x && y == target_y) continue;
             
             double r = (double)rand() / RAND_MAX;
             if (r < density) {
@@ -61,20 +63,33 @@ void world_generate_obstacles(world_t* world, double density) {
     }
 }
 
-// BFS na overenie, ci sa da zo vsetkych prazdnych policok dostat do [0,0]
+// BFS - skontroluje, ci sa zo vsetkych prazdnych miest da dostat do ciela
 bool world_check_reachability(world_t* world) {
     int size = world->width * world->height;
-    bool* visited = (bool*)calloc(size, sizeof(bool));
-    int* queue_x = (int*)malloc(size * sizeof(int));
-    int* queue_y = (int*)malloc(size * sizeof(int));
+    bool* visited = calloc(size, sizeof(bool));
+    if (!visited) return false;
+
+    int* queue_x = malloc(size * sizeof(int));
+    if (!queue_x) {
+        free(visited);
+        return false;
+    }
+    int* queue_y = malloc(size * sizeof(int));
+    if (!queue_y) {
+        free(visited);
+        free(queue_x);
+        return false;
+    }
     
     int head = 0, tail = 0;
-    
-    // Zacneme v [0,0] a ideme "opacne" - kam sa vsade da dostat zo stredu
-    queue_x[tail] = 0;
-    queue_y[tail] = 0;
+    int target_x = world->width / 2;
+    int target_y = world->height / 2;
+
+    // Ideme od ciela a pozerame kam sa da dostat
+    queue_x[tail] = target_x;
+    queue_y[tail] = target_y;
     tail++;
-    visited[0] = true;
+    visited[target_y * world->width + target_x] = true;
     
     int dx[] = {0, 0, -1, 1};
     int dy[] = {1, -1, 0, 0};
@@ -88,12 +103,6 @@ bool world_check_reachability(world_t* world) {
             int nx = cx + dx[i];
             int ny = cy + dy[i];
             
-            // Wrap-around podla zadania (svet bez prekazok ma wrap-around, 
-            // u sveta s prekazkami nie je explicitne povedane, ale byva to bez wrap-around
-            // alebo s nim. Ponechajme bez wrap-around pre prekazky pre jednoduchost 
-            // alebo implementujme podla potreby. Zadanie hovori: "svet bez prekazok - objavi sa na opacnom konci"
-            // Pri svete s prekazkami to nepise. Skusme bez wrapu pre prekazky.)
-            
             if (nx >= 0 && nx < world->width && ny >= 0 && ny < world->height) {
                 int idx = ny * world->width + nx;
                 if (!visited[idx] && world->grid[idx] == CELL_EMPTY) {
@@ -106,7 +115,7 @@ bool world_check_reachability(world_t* world) {
         }
     }
     
-    // Skontrolujeme ci sme navstivili vsetky EMPTY policka
+    // Su vsetky volne policka navstivene?
     bool all_reachable = true;
     for (int i = 0; i < size; i++) {
         if (world->grid[i] == CELL_EMPTY && !visited[i]) {
@@ -122,7 +131,7 @@ bool world_check_reachability(world_t* world) {
     return all_reachable;
 }
 
-// Ulozenie sveta do suboru
+// Ulozi mapu do suboru
 int world_save_to_file(world_t* world, const char* filename) {
     FILE* f = fopen(filename, "wb");
     if (!f) return -1;
@@ -135,7 +144,7 @@ int world_save_to_file(world_t* world, const char* filename) {
     return 0;
 }
 
-// Nacitanie sveta zo suboru
+// Nacita mapu zo suboru
 world_t* world_load_from_file(const char* filename) {
     FILE* f = fopen(filename, "rb");
     if (!f) return NULL;
