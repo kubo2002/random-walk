@@ -3,6 +3,7 @@ project(random_walk C)
 
 set(CMAKE_C_STANDARD 11)
 
+# Ciele pre kompiláciu
 add_executable(server
         server/src/server.c
         server/src/server_net.c
@@ -29,6 +30,8 @@ target_include_directories(client PRIVATE
         client/headers
         common
 )
+
+# clean a all su uz preddefinovane by default v CMake, dali by sa zadefinovat len ako aliases
 
 target_link_libraries(server pthread)
 target_link_libraries(client pthread)
