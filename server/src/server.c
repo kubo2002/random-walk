@@ -144,8 +144,8 @@ static void* simulation_thread(void* arg) {
 
             if (params.mode == 0) {
                 // Interaktivny mod - student style
-                int cur_x = 0; // Vzdy zacina na (0,0) podla zadania
-                int cur_y = 0;
+                int cur_x = w / 2; // Zacina v strede (napr. 5 pre sirku 11)
+                int cur_y = h / 2;
                 int max_steps = params.K;
                 
                 // Resetujeme mapu u klienta na zaciatku kazdej replikacie okrem prvej?
