@@ -5,7 +5,6 @@
 #include <pthread.h>
 #include <time.h>
 #include <netinet/in.h>
-
 #include "server_net.h"
 #include "protocol.h"
 #include "protocol_io.h"
@@ -143,60 +142,52 @@ static void* simulation_thread(void* arg) {
             }
             pthread_mutex_unlock(&g_sim_lock);
 
-            // Prechadzame kazdu bunku mapy
-            for (int y = 0; y < h; y++) {
-                for (int x = 0; x < w; x++) {
-                    if (world_get_cell(world, x, y) == CELL_OBSTACLE) continue;
+            if (params.mode == 0) {
+                // Interaktivny mod - student style
+                int cur_x = 0; // Vzdy zacina na (0,0) podla zadania
+                int cur_y = 0;
+                int max_steps = params.K;
+                
+                // Resetujeme mapu u klienta na zaciatku kazdej replikacie okrem prvej?
+                // Alebo ju nechame vykreslovat trajektorie cez seba? 
+                // Zadanie hovori "sa pre kazdu z replikacii bude vykreslovat trajektoria chodca na mape"
+                // Ak chceme vidiet vsetky naraz, nerobime reset. Ak chceme kazdu zvlast, robime reset.
+                // Student by asi chcel vidiet ako sa to prekryva alebo kazdu nanovo.
+                // Skusme poslat specialnu spravu na reset ak by sme chceli, ale v protokole nie je.
+                // Vyuzijeme render_interactive_reset v klientovi ak by sme pridali spravu.
+                // Alebo proste len pokracujeme.
 
-                    // Interaktivny mod - robime len 1 replikaciu z nahodneho bodu
-                    if (params.mode == 0 && r == 1) {
-                        int cur_x, cur_y;
-                        do {
-                            cur_x = rand() % w;
-                            cur_y = rand() % h;
-                        } while (world_get_cell(world, cur_x, cur_y) == CELL_OBSTACLE);
-
-                        int target_x = w / 2;
-                        int target_y = h / 2;
-                        int step_cnt = 0;
-                        int max_steps = params.K > 0 ? params.K : 1000; 
+                for (int step_cnt = 0; step_cnt < max_steps; step_cnt++) {
+                    // Posielame suradnice klientovi (relativne k stredu mapy)
+                    interactive_step_t ist = {cur_x - (w / 2), cur_y - (h / 2), (uint32_t)step_cnt};
+                    send_to_client(MSG_INTERACTIVE_STEP, &ist, sizeof(ist));
                     
-                        while (step_cnt < max_steps && (cur_x != target_x || cur_y != target_y)) {
-                            // Posielame relatívne k stredu
-                            interactive_step_t ist = {cur_x - (w / 2), cur_y - (h / 2), (uint32_t)step_cnt};
-                            send_to_client(MSG_INTERACTIVE_STEP, &ist, sizeof(ist));
-                        
-                            simulate_one_step(&cur_x, &cur_y, world, has_obstacles, &probs);
-                            step_cnt++;
-                            usleep(50000); // Nech to nie je hned
-                        }
-                        // Koniec interakcie
-                        interactive_step_t ist_final = {cur_x - (w / 2), cur_y - (h / 2), (uint32_t)step_cnt};
-                        send_to_client(MSG_INTERACTIVE_STEP, &ist_final, sizeof(ist_final));
-                        send_to_client(MSG_INTERACTIVE_DONE, NULL, 0);
-                        
-                        pthread_mutex_lock(&g_sim_lock);
-                        g_sim_running = 0;
-                        g_running = 0; // Server po interakcii konci
-                        pthread_mutex_unlock(&g_sim_lock);
-                        
-                        free(total_steps);
-                        free(success_k);
-                        return NULL;
-                    }
+                    simulate_one_step(&cur_x, &cur_y, world, has_obstacles, &probs);
+                    usleep(50000); // spomalenie aby bolo vidno pohyb
+                }
+                // Posledny krok
+                interactive_step_t ist_f = {cur_x - (w / 2), cur_y - (h / 2), (uint32_t)max_steps};
+                send_to_client(MSG_INTERACTIVE_STEP, &ist_f, sizeof(ist_f));
+                
+                send_to_client(MSG_INTERACTIVE_DONE, NULL, 0);
+                usleep(500000);
 
-                    // Summary mod vypocet
-                    int steps = simulate_walking(x, y, world, has_obstacles, &probs, params.K * 10);
-                    int idx = y * w + x;
-                    total_steps[idx] += steps;
-                    if (steps <= (int)params.K) {
-                        success_k[idx] += 1.0;
+            } else {
+                // Summary mod vypocet - prechadzame kazdu bunku mapy
+                for (int y = 0; y < h; y++) {
+                    for (int x = 0; x < w; x++) {
+                        if (world_get_cell(world, x, y) == CELL_OBSTACLE) continue;
+
+                        int steps = simulate_walking(x, y, world, has_obstacles, &probs, params.K);
+                        int idx = y * w + x;
+                        total_steps[idx] += steps;
+                        if (steps <= (int)params.K) {
+                            success_k[idx] += 1.0;
+                        }
                     }
                 }
-            }
-
-            // Po kazdej replikacii posleme info
-            if (params.mode == 1) {
+                
+                // Po kazdej replikacii posleme info
                 progress_t prog = {(uint32_t)r, (uint32_t)reps};
                 send_to_client(MSG_PROGRESS, &prog, sizeof(prog));
 
@@ -232,6 +223,7 @@ static void* simulation_thread(void* arg) {
 
         if (params.mode == 0) {
             send_to_client(MSG_INTERACTIVE_DONE, NULL, 0);
+            printf("[server] Interaktivna simulacia dokoncena.\n");
         } else {
             send_to_client(MSG_SUMMARY_DONE, NULL, 0);
         }
@@ -293,8 +285,7 @@ int main(int argc, char** argv) {
 
                 case MSG_START_SIM: {
                     start_sim_t* p = (start_sim_t*)payload;
-                    printf("[server] Nova simulacia: %dx%d, %d replikacii\n", 
-                           p->world_w, p->world_h, p->replications);
+                    printf("[server] Nova simulacia: %dx%d, %d replikacii\n", p->world_w, p->world_h, p->replications);
                     
                     pthread_mutex_lock(&g_sim_lock);
                     g_sim_params = *p;

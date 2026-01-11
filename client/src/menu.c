@@ -42,16 +42,11 @@ void menu_get_sim_params(start_sim_t* params, char* world_file, char* save_file,
         world_file[0] = '\0';
     }
     
-    if (params->mode == 1) { // Summary
-        printf("Pocet replikacii: ");
-        scanf("%u", &params->replications);
-        
-        printf("Max krokov (K): ");
-        scanf("%u", &params->K);
-    } else { // Interactive
-        params->replications = 1;
-        params->K = 1000;
-    }
+    printf("Pocet replikacii: ");
+    scanf("%u", &params->replications);
+    
+    printf("Max krokov (K): ");
+    scanf("%u", &params->K);
     
     uint32_t total_p = 0;
     while (total_p != 1000) {

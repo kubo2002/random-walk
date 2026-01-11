@@ -74,8 +74,8 @@ void* receiver_thread(void* arg) {
                 printf("\n[klient] Hotovo! Stlac ENTER a ideme spat do menu.\n");
                 break;
             case MSG_INTERACTIVE_DONE:
-                render_interactive_end();
-                printf("\n[klient] Koniec simulacie. Stlac ENTER pre menu.\n");
+                // render_interactive_end(); // Toto by nam zmazalo mapu predcasne
+                printf("\n[klient] Replikacia skoncila. Mozete sledovat vykreslovanie dalsej...\n");
                 break;
             case MSG_SERVER_EXIT:
                 printf("\n[klient] Server process skoncil.\n");
